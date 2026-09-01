@@ -1,0 +1,174 @@
+name: Deploy Service
+
+on:
+  repository_dispatch:
+    types: [deploy-service]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event.client_payload.source_repo }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      build_conclusion: ${{ steps.policy.outputs.build_conclusion }}
+      display_name: ${{ steps.policy.outputs.display_name }}
+      healthcheck_url: ${{ steps.policy.outputs.healthcheck_url }}
+      image_ref: ${{ steps.policy.outputs.image_ref }}
+      service_prefix: ${{ steps.policy.outputs.service_prefix }}
+      source_repo: ${{ steps.policy.outputs.source_repo }}
+      source_run_url: ${{ steps.policy.outputs.source_run_url }}
+      source_sha: ${{ steps.policy.outputs.source_sha }}
+      swarm_service: ${{ steps.policy.outputs.swarm_service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - id: policy
+        name: Validate source build and deployment policy
+        env:
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          TRUSTED_OWNER: ltana6927
+          EXPECTED_SERVER: monadao-prod
+          PRODUCTION_BRANCH: main
+          TRUSTED_WORKFLOW_PATH: .github/workflows/docker-build.yml
+          DEPLOY_CONFIG_PATH: .github/deploy.yml
+        run: node scripts/validate-request.mjs
+
+  deploy:
+    needs: validate
+    if: needs.validate.outputs.build_conclusion == 'success'
+    runs-on: [self-hosted, Linux, monadao-prod, swarm]
+    timeout-minutes: 15
+    steps:
+      - name: Validate deployment inputs on the server
+        env:
+          IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
+          SERVICE_PREFIX: ${{ needs.validate.outputs.service_prefix }}
+          SOURCE_REPO: ${{ needs.validate.outputs.source_repo }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+        run: |
+          set -euo pipefail
+          case "${SOURCE_REPO}" in
+            ltana6927/*) ;;
+            *) echo "Untrusted repository" >&2; exit 1 ;;
+          esac
+          case "${IMAGE_REF}" in
+            "ghcr.io/${SOURCE_REPO}/"*:"${SOURCE_SHA}") ;;
+            *) echo "Image reference is outside the repository namespace" >&2; exit 1 ;;
+          esac
+          case "${SWARM_SERVICE}" in
+            "${SERVICE_PREFIX}"|"${SERVICE_PREFIX}"-*) ;;
+            *) echo "Swarm service is outside the repository namespace" >&2; exit 1 ;;
+          esac
+          docker service inspect "${SWARM_SERVICE}" >/dev/null
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GHCR_PULL_TOKEN}" | docker login ghcr.io --username ltana6927 --password-stdin
+
+      - name: Pull immutable image
+        env:
+          IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
+        run: docker pull "${IMAGE_REF}"
+
+      - name: Update Swarm service
+        env:
+          IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+        run: |
+          set -euo pipefail
+          docker service update \
+            --with-registry-auth \
+            --update-order start-first \
+            --update-parallelism 1 \
+            --update-failure-action rollback \
+            --image "${IMAGE_REF}" \
+            --force \
+            --detach=false \
+            "${SWARM_SERVICE}"
+
+      - name: Verify public health endpoint
+        env:
+          HEALTHCHECK_URL: ${{ needs.validate.outputs.healthcheck_url }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl --proto '=https' --max-time 10 --fail --silent --show-error "${HEALTHCHECK_URL}" >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker service ps "${SWARM_SERVICE}" --no-trunc || true
+          docker service logs --tail 120 "${SWARM_SERVICE}" || true
+          exit 1
+
+  notify:
+    needs: [validate, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Feishu result
+        env:
+          BUILD_STATUS: ${{ needs.validate.outputs.build_conclusion }}
+          DEPLOY_STATUS: ${{ needs.deploy.result }}
+          DISPLAY_NAME: ${{ needs.validate.outputs.display_name || github.event.client_payload.source_repo }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          SOURCE_REPO: ${{ needs.validate.outputs.source_repo || github.event.client_payload.source_repo }}
+          SOURCE_RUN_URL: ${{ needs.validate.outputs.source_run_url }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha || github.event.client_payload.source_sha }}
+          VALIDATE_STATUS: ${{ needs.validate.result }}
+          DEPLOY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FEISHU_WEBHOOK}" ]; then
+            echo "FEISHU_WEBHOOK is not configured"
+            exit 0
+          fi
+
+          if [ "${VALIDATE_STATUS}" != "success" ]; then
+            RESULT="Rejected"
+            COLOR="red"
+          elif [ "${BUILD_STATUS}" != "success" ]; then
+            RESULT="Build failed"
+            COLOR="red"
+          elif [ "${DEPLOY_STATUS}" = "success" ]; then
+            RESULT="Deployment succeeded"
+            COLOR="green"
+          else
+            RESULT="Deployment failed"
+            COLOR="red"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg color "${COLOR}" \
+            --arg title "${DISPLAY_NAME}: ${RESULT}" \
+            --arg repo "${SOURCE_REPO}" \
+            --arg sha "${SOURCE_SHA}" \
+            --arg build "${BUILD_STATUS:-unknown}" \
+            --arg deploy "${DEPLOY_STATUS:-unknown}" \
+            --arg source_url "${SOURCE_RUN_URL}" \
+            --arg deploy_url "${DEPLOY_RUN_URL}" \
+            '{msg_type:"interactive",card:{header:{template:$color,title:{tag:"plain_text",content:$title}},elements:[{tag:"div",text:{tag:"lark_md",content:("**Repository:** " + $repo + "\n**Commit:** " + $sha + "\n**Build:** " + $build + "\n**Deploy:** " + $deploy)}},{tag:"action",actions:[{tag:"button",text:{tag:"plain_text",content:"Build logs"},url:$source_url,type:"default"},{tag:"button",text:{tag:"plain_text",content:"Deploy logs"},url:$deploy_url,type:"primary"}]}]}}')
+
+          curl --fail --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "${PAYLOAD}" \
+            "${FEISHU_WEBHOOK}"
+
