@@ -59,7 +59,6 @@ Use a fine-grained token limited to the Deploy Center repository with
 
 - `SOURCE_READ_TOKEN`: fine-grained read access to source repository Contents
   and Actions metadata. Required for private source repositories.
-- `GHCR_PULL_TOKEN`: read access to the source container packages.
 - `FEISHU_WEBHOOK`: Feishu bot webhook used for build and deployment results.
 
 ## Runner
@@ -74,3 +73,6 @@ The runner must be able to run Docker Swarm commands. The workflow is serialized
 per source repository and pulls the immutable SHA-tagged image before updating
 the service with `start-first` order.
 
+Private GHCR authentication is provisioned once on the server in the runner
+user's `~/.docker/config.json`. Deploy Center does not store a long-lived GHCR
+token in GitHub Actions secrets.

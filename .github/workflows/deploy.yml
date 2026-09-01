@@ -74,13 +74,6 @@ jobs:
           esac
           docker service inspect "${SWARM_SERVICE}" >/dev/null
 
-      - name: Authenticate to GHCR
-        env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-        run: |
-          set -euo pipefail
-          printf '%s' "${GHCR_PULL_TOKEN}" | docker login ghcr.io --username ltana6927 --password-stdin
-
       - name: Pull immutable image
         env:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
@@ -171,4 +164,3 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "${PAYLOAD}" \
             "${FEISHU_WEBHOOK}"
-
