@@ -5,6 +5,11 @@ GitHub sends a signed `workflow_run` webhook to a Cloudflare Worker, which
 forwards only `source_repo`, `source_sha`, and `source_run_id` to Deploy Center.
 Business repositories do not store cross-repository credentials.
 
+The Worker code is reusable but each deployed instance is intentionally
+single-tenant. Every user deploys an isolated Worker configured for their own
+repository owner, GitHub App installation, Deploy Center repository, and
+credentials. Unrelated users never share one receiver or credential store.
+
 Keep the existing `request-deploy.yml` and repository secret until the webhook
 path has completed one production deployment. This gives a safe rollback path.
 
@@ -30,6 +35,16 @@ npm install
 npx wrangler login
 npm run deploy:webhook
 ```
+
+Before deploying a fork, set these non-secret variables in `wrangler.jsonc`:
+
+- `TRUSTED_OWNER`: repository owner handled by this Worker instance.
+- `DEPLOY_CENTER_REPO`: that owner's Deploy Center in `owner/repository` form.
+- `GITHUB_APP_INSTALLATION_ID`: numeric ID of that owner's App installation.
+- `PRODUCTION_BRANCH`: trusted source branch.
+- `TRUSTED_WORKFLOW_PATH`: trusted Docker build workflow path.
+
+The Worker fails closed when any tenant binding is missing or invalid.
 
 Set secrets only through Wrangler's hidden interactive prompts:
 
