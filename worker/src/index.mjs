@@ -77,21 +77,32 @@ function deploymentRequest(payload, env) {
   };
 }
 
-function validConfiguration(env) {
-  return (
-    OWNER_PATTERN.test(env.TRUSTED_OWNER ?? "") &&
-    REPOSITORY_PATTERN.test(env.DEPLOY_CENTER_REPO ?? "") &&
-    env.DEPLOY_CENTER_REPO.startsWith(`${env.TRUSTED_OWNER}/`) &&
-    typeof env.PRODUCTION_BRANCH === "string" &&
-    env.PRODUCTION_BRANCH.length > 0 &&
-    typeof env.TRUSTED_WORKFLOW_PATH === "string" &&
-    env.TRUSTED_WORKFLOW_PATH.startsWith(".github/workflows/") &&
-    /^\d+$/.test(String(env.GITHUB_APP_INSTALLATION_ID ?? "")) &&
-    typeof env.GITHUB_WEBHOOK_SECRET === "string" &&
-    env.GITHUB_WEBHOOK_SECRET.length >= 32 &&
-    typeof env.DEPLOY_DISPATCH_TOKEN === "string" &&
-    env.DEPLOY_DISPATCH_TOKEN.length > 0
-  );
+function invalidConfigurationKeys(env) {
+  const checks = {
+    TRUSTED_OWNER: OWNER_PATTERN.test(env.TRUSTED_OWNER ?? ""),
+    DEPLOY_CENTER_REPO:
+      REPOSITORY_PATTERN.test(env.DEPLOY_CENTER_REPO ?? "") &&
+      env.DEPLOY_CENTER_REPO?.startsWith(`${env.TRUSTED_OWNER}/`),
+    PRODUCTION_BRANCH:
+      typeof env.PRODUCTION_BRANCH === "string" &&
+      env.PRODUCTION_BRANCH.length > 0,
+    TRUSTED_WORKFLOW_PATH:
+      typeof env.TRUSTED_WORKFLOW_PATH === "string" &&
+      env.TRUSTED_WORKFLOW_PATH.startsWith(".github/workflows/"),
+    GITHUB_APP_INSTALLATION_ID: /^\d+$/.test(
+      String(env.GITHUB_APP_INSTALLATION_ID ?? ""),
+    ),
+    GITHUB_WEBHOOK_SECRET:
+      typeof env.GITHUB_WEBHOOK_SECRET === "string" &&
+      env.GITHUB_WEBHOOK_SECRET.length >= 32,
+    DEPLOY_DISPATCH_TOKEN:
+      typeof env.DEPLOY_DISPATCH_TOKEN === "string" &&
+      env.DEPLOY_DISPATCH_TOKEN.length > 0,
+  };
+
+  return Object.entries(checks)
+    .filter(([, valid]) => !valid)
+    .map(([key]) => key);
 }
 
 export async function handleRequest(request, env, dispatchFetch = fetch) {
@@ -122,7 +133,9 @@ export async function handleRequest(request, env, dispatchFetch = fetch) {
   if (event === "ping") return response(200, "pong");
   if (event !== "workflow_run") return response(202, "event ignored");
 
-  if (!validConfiguration(env)) {
+  const invalidKeys = invalidConfigurationKeys(env);
+  if (invalidKeys.length > 0) {
+    console.error("Receiver configuration is invalid", { invalidKeys });
     return response(503, "receiver is not configured");
   }
 
