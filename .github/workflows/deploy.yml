@@ -50,6 +50,9 @@ jobs:
     if: needs.validate.outputs.build_conclusion == 'success'
     runs-on: [self-hosted, Linux, monadao-prod, swarm]
     timeout-minutes: 15
+    concurrency:
+      group: deploy-monadao-prod
+      cancel-in-progress: false
     steps:
       - name: Validate deployment inputs on the server
         env:
@@ -74,14 +77,46 @@ jobs:
           esac
           docker service inspect "${SWARM_SERVICE}" >/dev/null
 
-      - name: Pull immutable image
+      - id: image
+        name: Pull and verify immutable image
         env:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
-        run: docker pull "${IMAGE_REF}"
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE_REF}"
+
+          read -r IMAGE_REVISION < <(
+            docker image inspect \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+              "${IMAGE_REF}"
+          )
+          if [ "${IMAGE_REVISION}" != "${SOURCE_SHA}" ]; then
+            printf '%s\n' 'Image revision label does not match the verified source SHA' >&2
+            exit 1
+          fi
+
+          IMAGE_REPOSITORY="${IMAGE_REF%:*}"
+          read -r IMAGE_DIGEST < <(
+            docker image inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE_REF}"
+          )
+          case "${IMAGE_DIGEST}" in
+            "${IMAGE_REPOSITORY}"@sha256:*) ;;
+            *) printf '%s\n' 'Pulled image has an unexpected repository digest' >&2; exit 1 ;;
+          esac
+          DIGEST_HEX="${IMAGE_DIGEST#*@sha256:}"
+          case "${DIGEST_HEX}" in
+            *[!0-9a-f]*|'') printf '%s\n' 'Image digest is not lowercase hexadecimal' >&2; exit 1 ;;
+          esac
+          if [ "${#DIGEST_HEX}" -ne 64 ]; then
+            printf '%s\n' 'Image digest must contain 64 hexadecimal characters' >&2
+            exit 1
+          fi
+          printf 'image_digest=%s\n' "${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
 
       - name: Update Swarm service
         env:
-          IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
           set -euo pipefail
@@ -90,7 +125,7 @@ jobs:
             --update-order start-first \
             --update-parallelism 1 \
             --update-failure-action rollback \
-            --image "${IMAGE_REF}" \
+            --image "${IMAGE_DIGEST}" \
             --force \
             --detach=false \
             "${SWARM_SERVICE}"
@@ -108,7 +143,7 @@ jobs:
             sleep 5
           done
           docker service ps "${SWARM_SERVICE}" --no-trunc || true
-          docker service logs --tail 120 "${SWARM_SERVICE}" || true
+          printf '%s\n' 'Health check failed; inspect application logs in the private server logging system.' >&2
           exit 1
 
   notify:

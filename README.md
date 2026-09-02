@@ -85,8 +85,12 @@ self-hosted, Linux, X64, monadao-prod, swarm
 ```
 
 The runner must be able to run Docker Swarm commands. The workflow is serialized
-per source repository and pulls the immutable SHA-tagged image before updating
-the service with `start-first` order.
+per source repository and globally per production server. It pulls the full-SHA
+tag, verifies its OCI revision label, resolves it to an immutable registry
+digest, and updates the service by digest with `start-first` order.
+
+Application logs are never copied into GitHub Actions output. When a health
+check fails, inspect them through the server's private logging system.
 
 Private GHCR authentication is provisioned once on the server in the runner
 user's `~/.docker/config.json`. Deploy Center does not store a long-lived GHCR
