@@ -4,11 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "deploy:webhook": "wrangler deploy",
     "test": "node --test",
     "validate:config": "node scripts/validate-config.mjs"
   },
   "dependencies": {
     "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
   }
 }
-
