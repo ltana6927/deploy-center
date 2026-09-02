@@ -48,6 +48,11 @@ webhook described in [`docs/github-app-webhook.md`](docs/github-app-webhook.md).
 With the App installed for all repositories, a business repository needs no
 cross-repository token and no request workflow.
 
+The receiver is open-source and configuration-driven, but each deployment is
+single-tenant. Repository owner, Deploy Center repository, GitHub App
+installation, trusted branch, workflow path, and secrets are isolated per
+Worker instance.
+
 The repository-local dispatch flow below remains available during migration:
 
 The source repository needs:

@@ -2,6 +2,8 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const RUN_ID_PATTERN = /^\d+$/;
 const SIGNATURE_PATTERN = /^sha256=([a-f0-9]{64})$/;
+const OWNER_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38})$/;
+const REPOSITORY_PATTERN = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
 const encoder = new TextEncoder();
 
 function response(status, message) {
@@ -38,10 +40,9 @@ function deploymentRequest(payload, env) {
 
   const repository = payload.repository;
   const run = payload.workflow_run;
-  const expectedOwner = env.TRUSTED_OWNER ?? "ltana6927";
-  const expectedWorkflowPath =
-    env.TRUSTED_WORKFLOW_PATH ?? ".github/workflows/docker-build.yml";
-  const expectedBranch = env.PRODUCTION_BRANCH ?? "main";
+  const expectedOwner = env.TRUSTED_OWNER;
+  const expectedWorkflowPath = env.TRUSTED_WORKFLOW_PATH;
+  const expectedBranch = env.PRODUCTION_BRANCH;
 
   if (
     !repository ||
@@ -76,6 +77,23 @@ function deploymentRequest(payload, env) {
   };
 }
 
+function validConfiguration(env) {
+  return (
+    OWNER_PATTERN.test(env.TRUSTED_OWNER ?? "") &&
+    REPOSITORY_PATTERN.test(env.DEPLOY_CENTER_REPO ?? "") &&
+    env.DEPLOY_CENTER_REPO.startsWith(`${env.TRUSTED_OWNER}/`) &&
+    typeof env.PRODUCTION_BRANCH === "string" &&
+    env.PRODUCTION_BRANCH.length > 0 &&
+    typeof env.TRUSTED_WORKFLOW_PATH === "string" &&
+    env.TRUSTED_WORKFLOW_PATH.startsWith(".github/workflows/") &&
+    /^\d+$/.test(String(env.GITHUB_APP_INSTALLATION_ID ?? "")) &&
+    typeof env.GITHUB_WEBHOOK_SECRET === "string" &&
+    env.GITHUB_WEBHOOK_SECRET.length >= 32 &&
+    typeof env.DEPLOY_DISPATCH_TOKEN === "string" &&
+    env.DEPLOY_DISPATCH_TOKEN.length > 0
+  );
+}
+
 export async function handleRequest(request, env, dispatchFetch = fetch) {
   if (request.method !== "POST") {
     return response(405, "method not allowed");
@@ -104,6 +122,10 @@ export async function handleRequest(request, env, dispatchFetch = fetch) {
   if (event === "ping") return response(200, "pong");
   if (event !== "workflow_run") return response(202, "event ignored");
 
+  if (!validConfiguration(env)) {
+    return response(503, "receiver is not configured");
+  }
+
   let payload;
   try {
     payload = JSON.parse(new TextDecoder().decode(body));
@@ -114,21 +136,15 @@ export async function handleRequest(request, env, dispatchFetch = fetch) {
   const deployment = deploymentRequest(payload, env);
   if (!deployment) return response(202, "workflow run ignored");
 
-  if (!env.DEPLOY_DISPATCH_TOKEN) {
-    return response(503, "dispatch is not configured");
-  }
-
-  const deployCenterRepo =
-    env.DEPLOY_CENTER_REPO ?? "ltana6927/deploy-center";
   const upstream = await dispatchFetch(
-    `https://api.github.com/repos/${deployCenterRepo}/dispatches`,
+    `https://api.github.com/repos/${env.DEPLOY_CENTER_REPO}/dispatches`,
     {
       method: "POST",
       headers: {
         Accept: "application/vnd.github+json",
         Authorization: `Bearer ${env.DEPLOY_DISPATCH_TOKEN}`,
         "Content-Type": "application/json",
-        "User-Agent": "ltana6927-deploy-webhook",
+        "User-Agent": "deploy-center-webhook",
         "X-GitHub-Api-Version": "2022-11-28",
       },
       body: JSON.stringify({

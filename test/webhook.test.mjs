@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { handleRequest } from "../worker/src/index.mjs";
 
-const secret = "test-webhook-secret";
+const secret = "test-webhook-secret-with-at-least-32-bytes";
 const env = {
   DEPLOY_CENTER_REPO: "ltana6927/deploy-center",
   DEPLOY_DISPATCH_TOKEN: "test-dispatch-token",
@@ -138,4 +138,60 @@ test("does not expose an upstream GitHub error body", async () => {
 
   assert.equal(result.status, 502);
   assert.deepEqual(await result.json(), { message: "dispatch failed" });
+});
+
+test("rejects incomplete tenant configuration", async () => {
+  let dispatched = false;
+  const result = await handleRequest(
+    await webhookRequest(payload),
+    { ...env, DEPLOY_CENTER_REPO: "" },
+    async () => {
+      dispatched = true;
+      return new Response(null, { status: 204 });
+    },
+  );
+
+  assert.equal(result.status, 503);
+  assert.equal(dispatched, false);
+});
+
+test("isolates events from another installation", async () => {
+  let dispatched = false;
+  const result = await handleRequest(
+    await webhookRequest({ ...payload, installation: { id: 99 } }),
+    env,
+    async () => {
+      dispatched = true;
+      return new Response(null, { status: 204 });
+    },
+  );
+
+  assert.equal(result.status, 202);
+  assert.equal(dispatched, false);
+});
+
+test("isolates repositories owned by another tenant", async () => {
+  const foreign = {
+    ...payload,
+    repository: {
+      full_name: "someone-else/railsanya-meeting",
+      owner: { login: "someone-else" },
+    },
+    workflow_run: {
+      ...payload.workflow_run,
+      repository: { full_name: "someone-else/railsanya-meeting" },
+    },
+  };
+  let dispatched = false;
+  const result = await handleRequest(
+    await webhookRequest(foreign),
+    env,
+    async () => {
+      dispatched = true;
+      return new Response(null, { status: 204 });
+    },
+  );
+
+  assert.equal(result.status, 202);
+  assert.equal(dispatched, false);
 });
