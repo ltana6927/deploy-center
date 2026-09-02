@@ -6,6 +6,7 @@
   "workers_dev": true,
   "vars": {
     "DEPLOY_CENTER_REPO": "ltana6927/deploy-center",
+    "GITHUB_APP_INSTALLATION_ID": "158549861",
     "PRODUCTION_BRANCH": "main",
     "TRUSTED_OWNER": "ltana6927",
     "TRUSTED_WORKFLOW_PATH": ".github/workflows/docker-build.yml"
