@@ -43,6 +43,13 @@ determines the allowed image and Swarm service namespace.
 
 ## Source workflow
 
+The preferred notification path is the signed GitHub App `workflow_run`
+webhook described in [`docs/github-app-webhook.md`](docs/github-app-webhook.md).
+With the App installed for all repositories, a business repository needs no
+cross-repository token and no request workflow.
+
+The repository-local dispatch flow below remains available during migration:
+
 The source repository needs:
 
 1. A build workflow at `.github/workflows/docker-build.yml` that pushes both
@@ -87,7 +94,9 @@ self-hosted, Linux, X64, monadao-prod, swarm
 The runner must be able to run Docker Swarm commands. The workflow is serialized
 per source repository and globally per production server. It pulls the full-SHA
 tag, verifies its OCI revision label, resolves it to an immutable registry
-digest, and updates the service by digest with `start-first` order.
+digest, and updates the service by digest with `start-first` order. Webhook
+redeliveries are idempotent: an already-running digest skips the Swarm update
+while still running the health check.
 
 Application logs are never copied into GitHub Actions output. When a health
 check fails, inspect them through the server's private logging system.

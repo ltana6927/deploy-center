@@ -82,6 +82,7 @@ jobs:
         env:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
           set -euo pipefail
           docker pull "${IMAGE_REF}"
@@ -114,7 +115,19 @@ jobs:
           fi
           printf 'image_digest=%s\n' "${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
 
+          read -r CURRENT_IMAGE < <(
+            docker service inspect \
+              --format '{{ .Spec.TaskTemplate.ContainerSpec.Image }}' \
+              "${SWARM_SERVICE}"
+          )
+          if [ "${CURRENT_IMAGE}" = "${IMAGE_DIGEST}" ]; then
+            printf 'already_deployed=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            printf 'already_deployed=false\n' >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Update Swarm service
+        if: steps.image.outputs.already_deployed != 'true'
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}

@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "deploy-center-webhook",
+  "main": "worker/src/index.mjs",
+  "compatibility_date": "2026-09-02",
+  "workers_dev": true,
+  "vars": {
+    "DEPLOY_CENTER_REPO": "ltana6927/deploy-center",
+    "PRODUCTION_BRANCH": "main",
+    "TRUSTED_OWNER": "ltana6927",
+    "TRUSTED_WORKFLOW_PATH": ".github/workflows/docker-build.yml"
+  }
+}
