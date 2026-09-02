@@ -20,3 +20,8 @@ token deliberately covers all repositories owned by `ltana6927`, but grants
 only Actions and Contents read access. This exception removes per-repository
 credential maintenance and must be reconsidered if unrelated sensitive private
 repositories are added to the account.
+
+The public workflow must never print application or container logs. Production
+diagnostics remain on the server or in a private logging system. Images are
+checked against the verified source revision and deployed by registry digest so
+a mutable tag cannot change the artifact selected for a rollout.
