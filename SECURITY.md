@@ -9,3 +9,14 @@ Deployment requests are rejected unless their repository owner, completed
 build, commit, branch, workflow path, image namespace, and Swarm service
 namespace all pass validation.
 
+Long-lived deployment credentials must be fine-grained, expiring PATs with only
+the permissions required by their role. Never initialize repository secrets
+from `gh auth token`, pass a token as a command-line argument, or commit it to a
+file. Follow
+[`docs/fine-grained-pat.md`](docs/fine-grained-pat.md) for creation and rotation.
+
+The dispatch token remains restricted to only `deploy-center`. The source-read
+token deliberately covers all repositories owned by `ltana6927`, but grants
+only Actions and Contents read access. This exception removes per-repository
+credential maintenance and must be reconsidered if unrelated sensitive private
+repositories are added to the account.

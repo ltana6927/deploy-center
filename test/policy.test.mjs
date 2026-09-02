@@ -43,6 +43,22 @@ test("rejects a repository owned by another user", () => {
   );
 });
 
+test("rejects extra dispatch fields", () => {
+  assert.throws(
+    () =>
+      validateDispatch(
+        {
+          source_repo: request.sourceRepo,
+          source_sha: request.sourceSha,
+          source_run_id: request.sourceRunId,
+          image: "ghcr.io/attacker/image:latest",
+        },
+        "ltana6927",
+      ),
+    /unsupported client_payload key/,
+  );
+});
+
 test("validates the completed trusted build", () => {
   assert.doesNotThrow(() =>
     validateWorkflowRun(
@@ -61,6 +77,29 @@ test("validates the completed trusted build", () => {
         workflowPath: ".github/workflows/docker-build.yml",
       },
     ),
+  );
+});
+
+test("rejects a failed trusted build", () => {
+  assert.throws(
+    () =>
+      validateWorkflowRun(
+        {
+          repository: { full_name: request.sourceRepo },
+          head_sha: request.sourceSha,
+          head_branch: "main",
+          path: ".github/workflows/docker-build.yml",
+          status: "completed",
+          conclusion: "failure",
+          event: "push",
+        },
+        request,
+        {
+          productionBranch: "main",
+          workflowPath: ".github/workflows/docker-build.yml",
+        },
+      ),
+    /did not succeed/,
   );
 });
 
@@ -124,4 +163,3 @@ test("rejects arbitrary commands and private health targets", () => {
     /unsupported deployment config key/,
   );
 });
-

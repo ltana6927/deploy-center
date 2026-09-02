@@ -1,0 +1,20 @@
+name: Request Production Deploy
+
+on:
+  workflow_run:
+    workflows: [Docker Build]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  request:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    uses: ltana6927/deploy-center/.github/workflows/request-deploy-reusable.yml@REPLACE_WITH_IMMUTABLE_COMMIT_SHA
+    with:
+      source_sha: ${{ github.event.workflow_run.head_sha }}
+      source_run_id: ${{ format('{0}', github.event.workflow_run.id) }}
+    secrets:
+      DEPLOY_CENTER_TOKEN: ${{ secrets.DEPLOY_CENTER_TOKEN }}
