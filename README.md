@@ -47,19 +47,34 @@ The source repository needs:
 
 1. A build workflow at `.github/workflows/docker-build.yml` that pushes both
    the commit SHA tag and `latest`.
-2. A `.github/workflows/request-deploy.yml` workflow triggered by completion
-   of that build.
+2. A `.github/workflows/request-deploy.yml` workflow triggered by successful
+   completion of that build. Copy [`examples/request-deploy.yml`](examples/request-deploy.yml)
+   and replace its reusable-workflow ref with an immutable Deploy Center commit
+   SHA. The dispatch implementation is shared; the source repository sends only
+   `source_repo`, `source_sha`, and `source_run_id`.
 3. A `DEPLOY_CENTER_TOKEN` secret with permission to send repository dispatch
    events to `ltana6927/deploy-center`.
 
 Use a fine-grained token limited to the Deploy Center repository with
 `Contents: Read and write`. Do not use a broad personal token long term.
 
+No Deploy Center workflow or `SOURCE_READ_TOKEN` edit is needed when onboarding
+another repository. Add its `.github/deploy.yml`, add or reuse
+`request-deploy.yml`, and set its repository-local `DEPLOY_CENTER_TOKEN`. The
+trusted build must keep the conventional path
+`.github/workflows/docker-build.yml`, build from `main`, and publish the full
+lowercase commit SHA tag.
+
 ## Deploy Center secrets
 
-- `SOURCE_READ_TOKEN`: fine-grained read access to source repository Contents
-  and Actions metadata. Required for private source repositories.
+- `SOURCE_READ_TOKEN`: fine-grained `Actions: Read-only` and `Contents:
+  Read-only` access to repositories owned by `ltana6927`. It is configured for
+  all repositories so new private sources require no token update. This trades
+  repository isolation for maintenance-free onboarding; see the security guide.
 - `FEISHU_WEBHOOK`: Feishu bot webhook used for build and deployment results.
+
+See [`docs/fine-grained-pat.md`](docs/fine-grained-pat.md) for the exact GitHub
+UI selections and history-safe interactive `gh secret set` commands.
 
 ## Runner
 

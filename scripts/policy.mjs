@@ -13,6 +13,11 @@ const ALLOWED_CONFIG_KEYS = new Set([
   "healthcheck_url",
   "display_name",
 ]);
+const ALLOWED_DISPATCH_KEYS = new Set([
+  "source_repo",
+  "source_sha",
+  "source_run_id",
+]);
 
 function requiredString(value, field) {
   if (typeof value !== "string" || value.trim() === "") {
@@ -22,6 +27,16 @@ function requiredString(value, field) {
 }
 
 export function validateDispatch(payload, trustedOwner) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("client_payload must be an object");
+  }
+
+  for (const key of Object.keys(payload)) {
+    if (!ALLOWED_DISPATCH_KEYS.has(key)) {
+      throw new Error(`unsupported client_payload key: ${key}`);
+    }
+  }
+
   const sourceRepo = requiredString(payload?.source_repo, "source_repo");
   const sourceSha = requiredString(payload?.source_sha, "source_sha");
   const sourceRunId = String(payload?.source_run_id ?? "").trim();
@@ -65,8 +80,8 @@ export function validateWorkflowRun(run, request, options) {
   if (!["push", "workflow_dispatch"].includes(run?.event)) {
     throw new Error(`workflow event ${run?.event ?? "unknown"} is not allowed`);
   }
-  if (typeof run?.conclusion !== "string" || run.conclusion === "") {
-    throw new Error("workflow run has no conclusion");
+  if (run?.conclusion !== "success") {
+    throw new Error("workflow run did not succeed");
   }
 }
 
@@ -154,4 +169,3 @@ export function validateDeployConfig(config, request, expectedServer) {
     swarmService,
   };
 }
-
