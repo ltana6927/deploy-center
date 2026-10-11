@@ -4,7 +4,41 @@ import {
   validateDeployConfig,
   validateDispatch,
   validateWorkflowRun,
+  validateImageArchive,
 } from "../scripts/policy.mjs";
+
+test("image archives are bound to the successful source run and commit", () => {
+  const artifact = {
+    id: 456,
+    name: `production-image-${"a".repeat(40)}`,
+    expired: false,
+    size_in_bytes: 100,
+    digest: `sha256:${"b".repeat(64)}`,
+    workflow_run: { id: 123, head_sha: "a".repeat(40) },
+  };
+  assert.deepEqual(validateImageArchive([artifact], request), {
+    id: "456",
+    digest: artifact.digest,
+  });
+  assert.equal(validateImageArchive([], request), null);
+  for (const override of [
+    { expired: true },
+    { id: "456" },
+    { digest: "invalid" },
+    { size_in_bytes: 2 ** 31 },
+    { workflow_run: { id: 999, head_sha: request.sourceSha } },
+    { workflow_run: { id: 123, head_sha: "c".repeat(40) } },
+  ]) {
+    assert.throws(
+      () => validateImageArchive([{ ...artifact, ...override }], request),
+      /invalid|another build/,
+    );
+  }
+  assert.throws(
+    () => validateImageArchive([artifact, artifact], request),
+    /ambiguous/,
+  );
+});
 
 const request = {
   owner: "ltana6927",

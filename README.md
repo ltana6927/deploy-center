@@ -103,7 +103,20 @@ digest, and updates the service by digest with `start-first` order. Webhook
 redeliveries are idempotent: an already-running digest skips the Swarm update
 while still running the health check.
 
-Image downloads have two attempts, each bounded to 20 minutes with a 30-second
+For builds that publish `production-image-<sha>` in the trusted Docker build
+run, a registry pull is bounded to three minutes. A failure automatically
+downloads that run's artifact over the separate artifact-storage route, with
+up to eight attempts and HTTP range resumption. No workstation or SSH upload
+is needed. The API artifact digest, exported image checksum, source revision,
+repository, image ID, and registry digest must agree before rollout. Archive
+downloads use the existing source-read token and private temporary files that
+are removed on exit. The runner needs Python 3 and curl with range support.
+
+An authorized `verify-image-archive` dispatch accepts the same three validated
+source fields and exercises the archive path without a Swarm rollout. Use it
+to check the real download, checksum and registry metadata path independently.
+
+Older builds without an archive retain two attempts, each bounded to 20 minutes with a 30-second
 termination grace period. A failed first attempt waits 15 seconds before
 retrying; Docker reuses completed layers. The deployment job allows 65 minutes
 so a slow or interrupted registry download does not consume the rollout and
