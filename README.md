@@ -106,7 +106,10 @@ while still running the health check.
 For builds that publish `production-image-<sha>` in the trusted Docker build
 run, a registry pull is bounded to three minutes. A failure automatically
 downloads that run's artifact over the separate artifact-storage route, with
-up to eight attempts and HTTP range resumption. No workstation or SSH upload
+eight concurrent HTTP ranges, each with up to eight resumable attempts. Range
+responses must match the expected offset and artifact size; timeouts keep only
+valid partial bytes, and expired storage URLs are refreshed without forwarding
+the GitHub credential. No workstation or SSH upload
 is needed. The API artifact digest, exported image checksum, source revision,
 repository, image ID, and registry digest must agree before rollout. Archive
 downloads use the existing source-read token and private temporary files that

@@ -16,6 +16,11 @@ const workflow = parse(
 const imageStep = workflow.jobs.deploy.steps.find(
   (step) => step.id === "image",
 );
+const nativePython = spawnSync(
+  "python3",
+  ["-c", "import sys; print(sys.executable)"],
+  { encoding: "utf8" },
+).stdout.trim();
 
 test("the image execution step receives every archive recovery input", () => {
   for (const name of [
@@ -23,6 +28,7 @@ test("the image execution step receives every archive recovery input", () => {
     "SOURCE_READ_TOKEN",
     "IMAGE_ARCHIVE_ID",
     "IMAGE_ARCHIVE_DIGEST",
+    "IMAGE_ARCHIVE_SIZE",
     "IMAGE_RECOVERY_ONLY",
   ]) {
     assert.ok(
@@ -35,6 +41,20 @@ test("the image execution step receives every archive recovery input", () => {
     /github\.event\.action == 'verify-image-archive'/,
   );
 });
+test("the server checks out the trusted downloader without persisting credentials", () => {
+  const checkout = workflow.jobs.deploy.steps.find(
+    (step) => step.uses === "actions/checkout@v5",
+  );
+  assert.equal(checkout.with["persist-credentials"], false);
+  assert.match(
+    imageStep.run,
+    /python3 "\$\{GITHUB_WORKSPACE\}\/scripts\/download-archive\.py"/,
+  );
+  assert.equal(
+    imageStep.env.IMAGE_ARCHIVE_SIZE,
+    "${{ needs.validate.outputs.image_archive_size }}",
+  );
+});
 const stub = `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
@@ -42,6 +62,14 @@ const { spawnSync } = require("node:child_process");
 const name = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.PULL_TEST_LOG, JSON.stringify({ name, args }) + "\\n");
+if (name === "python3") {
+  if (args[0].endsWith("/scripts/download-archive.py")) {
+    fs.copyFileSync(process.env.PULL_TEST_ARCHIVE, path.join(process.env.ARCHIVE_DIR, "image.zip"));
+    process.exit(0);
+  }
+  const result = spawnSync(process.env.PULL_TEST_NATIVE_PYTHON, args, { stdio: "inherit" });
+  process.exit(result.status ?? 1);
+}
 if (name === "timeout") {
   const result = spawnSync(args[3], args.slice(4), { stdio: "inherit" });
   process.exit(result.status ?? 1);
@@ -76,7 +104,7 @@ async function run(t, overrides = {}) {
   const bin = join(directory, "bin");
   await mkdir(bin);
   await Promise.all(
-    ["docker", "timeout", "sleep", "curl"].map((name) =>
+    ["docker", "timeout", "sleep", "curl", "python3"].map((name) =>
       writeFile(join(bin, name), stub, { mode: 0o700 }),
     ),
   );
@@ -98,7 +126,10 @@ async function run(t, overrides = {}) {
       SOURCE_READ_TOKEN: "test-only",
       IMAGE_ARCHIVE_ID: "",
       IMAGE_ARCHIVE_DIGEST: "",
+      IMAGE_ARCHIVE_SIZE: "",
       IMAGE_RECOVERY_ONLY: "false",
+      GITHUB_WORKSPACE: process.cwd(),
+      PULL_TEST_NATIVE_PYTHON: nativePython,
       PULL_TEST_LOG: join(directory, "calls"),
       PULL_TEST_COUNT: join(directory, "count"),
       PULL_TEST_DIGEST: digest,
@@ -206,22 +237,25 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive:
   return {
     PULL_TEST_ARCHIVE: archive,
     IMAGE_ARCHIVE_ID: "456",
+    IMAGE_ARCHIVE_SIZE: String((await readFile(archive)).length),
     IMAGE_ARCHIVE_DIGEST: `sha256:${createHash("sha256")
       .update(await readFile(archive))
       .digest("hex")}`,
   };
 }
 
-test("registry interruption automatically recovers the bound archive, resuming after EOF", async (t) => {
+test("registry interruption automatically recovers the bound archive through the range downloader", async (t) => {
   const result = await run(t, {
     ...(await fixture(t)),
     PULL_TEST_FAILURE: "first",
-    PULL_TEST_DOWNLOAD_FAILURE: "1",
   });
   assert.equal(result.status, 0, result.stderr);
-  const downloads = result.calls.filter((call) => call.name === "curl");
-  assert.equal(downloads.length, 2);
-  assert.ok(downloads.every((call) => call.args.includes("--continue-at")));
+  const downloads = result.calls.filter(
+    (call) =>
+      call.name === "python3" &&
+      call.args[0].endsWith("/scripts/download-archive.py"),
+  );
+  assert.equal(downloads.length, 1);
   assert.equal(
     result.calls.find((call) => call.name === "timeout").args[2],
     "3m",
