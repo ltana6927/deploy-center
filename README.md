@@ -103,6 +103,13 @@ digest, and updates the service by digest with `start-first` order. Webhook
 redeliveries are idempotent: an already-running digest skips the Swarm update
 while still running the health check.
 
+Image downloads have two attempts, each bounded to 20 minutes with a 30-second
+termination grace period. A failed first attempt waits 15 seconds before
+retrying; Docker reuses completed layers. The deployment job allows 65 minutes
+so a slow or interrupted registry download does not consume the rollout and
+health-check budget. Exhausted downloads fail before the service is updated;
+every successful download still requires matching revision and digest checks.
+
 Application logs are never copied into GitHub Actions output. When a health
 check fails, inspect them through the server's private logging system.
 
