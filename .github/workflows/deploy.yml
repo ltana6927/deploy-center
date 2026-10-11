@@ -40,7 +40,6 @@ jobs:
         name: Validate source build and deployment policy
         env:
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
-          IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
           TRUSTED_OWNER: ltana6927
           EXPECTED_SERVER: monadao-prod
           PRODUCTION_BRANCH: main
@@ -92,6 +91,7 @@ jobs:
           IMAGE_ARCHIVE_ID: ${{ needs.validate.outputs.image_archive_id }}
           IMAGE_ARCHIVE_DIGEST: ${{ needs.validate.outputs.image_archive_digest }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           IMAGE_PULLED=false

@@ -16,6 +16,25 @@ const workflow = parse(
 const imageStep = workflow.jobs.deploy.steps.find(
   (step) => step.id === "image",
 );
+
+test("the image execution step receives every archive recovery input", () => {
+  for (const name of [
+    "SOURCE_REPO",
+    "SOURCE_READ_TOKEN",
+    "IMAGE_ARCHIVE_ID",
+    "IMAGE_ARCHIVE_DIGEST",
+    "IMAGE_RECOVERY_ONLY",
+  ]) {
+    assert.ok(
+      Object.hasOwn(imageStep.env, name),
+      `Missing image-step environment: ${name}`,
+    );
+  }
+  assert.match(
+    imageStep.env.IMAGE_RECOVERY_ONLY,
+    /github\.event\.action == 'verify-image-archive'/,
+  );
+});
 const stub = `#!${process.execPath}
 const fs = require("node:fs");
 const path = require("node:path");
