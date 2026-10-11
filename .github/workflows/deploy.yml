@@ -49,7 +49,8 @@ jobs:
     needs: validate
     if: needs.validate.outputs.build_conclusion == 'success'
     runs-on: [self-hosted, Linux, monadao-prod, swarm]
-    timeout-minutes: 15
+    # Two bounded image downloads plus rollout and health verification.
+    timeout-minutes: 65
     concurrency:
       group: deploy-monadao-prod
       cancel-in-progress: false
@@ -79,13 +80,31 @@ jobs:
 
       - id: image
         name: Pull and verify immutable image
+        timeout-minutes: 45
         env:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
           set -euo pipefail
-          docker pull "${IMAGE_REF}"
+          IMAGE_PULLED=false
+          for attempt in 1 2; do
+            printf 'Pulling verified image (attempt %s/2)\n' "${attempt}"
+            if timeout --signal=TERM --kill-after=30s 20m docker pull "${IMAGE_REF}"; then
+              IMAGE_PULLED=true
+              break
+            else
+              PULL_STATUS=$?
+              printf 'Image pull failed with exit code %s\n' "${PULL_STATUS}" >&2
+            fi
+            if [ "${attempt}" -lt 2 ]; then
+              sleep 15
+            fi
+          done
+          if [ "${IMAGE_PULLED}" != true ]; then
+            printf '%s\n' 'Image pull failed after two attempts; the running service was not changed.' >&2
+            exit 1
+          fi
 
           read -r IMAGE_REVISION < <(
             docker image inspect \
@@ -128,6 +147,7 @@ jobs:
 
       - name: Update Swarm service
         if: steps.image.outputs.already_deployed != 'true'
+        timeout-minutes: 8
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
@@ -144,6 +164,7 @@ jobs:
             "${SWARM_SERVICE}"
 
       - name: Verify public health endpoint
+        timeout-minutes: 8
         env:
           HEALTHCHECK_URL: ${{ needs.validate.outputs.healthcheck_url }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
