@@ -19,6 +19,32 @@ const ALLOWED_DISPATCH_KEYS = new Set([
   "source_run_id",
 ]);
 
+export function validateImageArchive(artifacts, request) {
+  const matches = artifacts.filter(
+    (artifact) => artifact.name === `production-image-${request.sourceSha}`,
+  );
+  if (matches.length === 0) return null; // Older builds retain the registry path.
+  if (matches.length !== 1)
+    throw new Error("Build has ambiguous image archives");
+  const artifact = matches[0];
+  if (
+    artifact.expired !== false ||
+    !Number.isSafeInteger(artifact.id) ||
+    artifact.id <= 0 ||
+    !Number.isSafeInteger(artifact.size_in_bytes) ||
+    artifact.size_in_bytes <= 0 ||
+    artifact.size_in_bytes > 2 ** 30 ||
+    !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? "") ||
+    String(artifact.workflow_run?.id) !== request.sourceRunId ||
+    artifact.workflow_run?.head_sha !== request.sourceSha
+  ) {
+    throw new Error(
+      "Image archive is expired, invalid, or belongs to another build",
+    );
+  }
+  return { id: String(artifact.id), digest: artifact.digest };
+}
+
 function requiredString(value, field) {
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`${field} must be a non-empty string`);

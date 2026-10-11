@@ -2,7 +2,7 @@ name: Deploy Service
 
 on:
   repository_dispatch:
-    types: [deploy-service]
+    types: [deploy-service, verify-image-archive]
 
 permissions:
   contents: read
@@ -19,6 +19,8 @@ jobs:
       display_name: ${{ steps.policy.outputs.display_name }}
       healthcheck_url: ${{ steps.policy.outputs.healthcheck_url }}
       image_ref: ${{ steps.policy.outputs.image_ref }}
+      image_archive_id: ${{ steps.policy.outputs.image_archive_id }}
+      image_archive_digest: ${{ steps.policy.outputs.image_archive_digest }}
       service_prefix: ${{ steps.policy.outputs.service_prefix }}
       source_repo: ${{ steps.policy.outputs.source_repo }}
       source_run_url: ${{ steps.policy.outputs.source_run_url }}
@@ -38,6 +40,7 @@ jobs:
         name: Validate source build and deployment policy
         env:
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+          IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
           TRUSTED_OWNER: ltana6927
           EXPECTED_SERVER: monadao-prod
           PRODUCTION_BRANCH: main
@@ -49,7 +52,7 @@ jobs:
     needs: validate
     if: needs.validate.outputs.build_conclusion == 'success'
     runs-on: [self-hosted, Linux, monadao-prod, swarm]
-    # Two bounded image downloads plus rollout and health verification.
+    # Registry download or resumable archive recovery plus rollout and health.
     timeout-minutes: 65
     concurrency:
       group: deploy-monadao-prod
@@ -85,22 +88,107 @@ jobs:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+          SOURCE_REPO: ${{ needs.validate.outputs.source_repo }}
+          IMAGE_ARCHIVE_ID: ${{ needs.validate.outputs.image_archive_id }}
+          IMAGE_ARCHIVE_DIGEST: ${{ needs.validate.outputs.image_archive_digest }}
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
         run: |
           set -euo pipefail
           IMAGE_PULLED=false
-          for attempt in 1 2; do
-            printf 'Pulling verified image (attempt %s/2)\n' "${attempt}"
-            if timeout --signal=TERM --kill-after=30s 20m docker pull "${IMAGE_REF}"; then
+          PULL_ATTEMPTS=2
+          PULL_TIMEOUT=20m
+          if [ -n "${IMAGE_ARCHIVE_ID}" ]; then
+            PULL_ATTEMPTS=1
+            PULL_TIMEOUT=3m
+          fi
+          if [ "${IMAGE_RECOVERY_ONLY}" = true ]; then
+            if [ -z "${IMAGE_ARCHIVE_ID}" ]; then
+              printf '%s\n' 'This successful build has no archive to verify.' >&2
+              exit 1
+            fi
+            PULL_ATTEMPTS=0
+          fi
+          for ((attempt=1; attempt<=PULL_ATTEMPTS; attempt++)); do
+            printf 'Pulling verified image (attempt %s/%s)\n' "${attempt}" "${PULL_ATTEMPTS}"
+            if timeout --signal=TERM --kill-after=30s "${PULL_TIMEOUT}" docker pull "${IMAGE_REF}"; then
               IMAGE_PULLED=true
               break
             else
               PULL_STATUS=$?
               printf 'Image pull failed with exit code %s\n' "${PULL_STATUS}" >&2
             fi
-            if [ "${attempt}" -lt 2 ]; then
+            if [ "${attempt}" -lt "${PULL_ATTEMPTS}" ]; then
               sleep 15
             fi
           done
+          ARCHIVE_IMAGE_DIGEST=""
+          if [ "${IMAGE_PULLED}" != true ] && [ -n "${IMAGE_ARCHIVE_ID}" ]; then
+            umask 077
+            ARCHIVE_DIR="$(mktemp -d "${RUNNER_TEMP}/production-image.XXXXXX")"
+            trap 'rm -rf -- "${ARCHIVE_DIR}"' EXIT
+            export ARCHIVE_DIR
+            ARCHIVE_DOWNLOADED=false
+            for archive_attempt in {1..8}; do
+              printf 'Recovering verified build archive (attempt %s/8)\n' "${archive_attempt}"
+              if curl --proto '=https' --proto-redir '=https' --location --fail --silent --show-error \
+                --connect-timeout 15 --max-time 240 --speed-time 45 --speed-limit 1024 \
+                --continue-at - --output "${ARCHIVE_DIR}/image.zip" \
+                --header "Authorization: Bearer ${SOURCE_READ_TOKEN}" \
+                --header 'Accept: application/vnd.github+json' \
+                "https://api.github.com/repos/${SOURCE_REPO}/actions/artifacts/${IMAGE_ARCHIVE_ID}/zip"; then
+                ARCHIVE_DOWNLOADED=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "${ARCHIVE_DOWNLOADED}" != true ]; then
+              printf '%s\n' 'Archive recovery failed; the running service was not changed.' >&2
+              exit 1
+            fi
+            ARCHIVE_INFO="$(python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, stat, zipfile
+          directory = pathlib.Path(os.environ['ARCHIVE_DIR'])
+          def checksum(path):
+              digest = hashlib.sha256()
+              with path.open('rb') as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b''):
+                      digest.update(block)
+              return digest.hexdigest()
+          if 'sha256:' + checksum(directory / 'image.zip') != os.environ['IMAGE_ARCHIVE_DIGEST']:
+              raise ValueError('Build artifact checksum mismatch')
+          allowed = {'main-image.tar.gz': 2 ** 30, 'main-image.tar.gz.sha256': 128, 'image.json': 4096}
+          with zipfile.ZipFile(directory / 'image.zip') as archive:
+              entries = archive.infolist()
+              if len(entries) != len(allowed) or {entry.filename for entry in entries} != set(allowed):
+                  raise ValueError('Unexpected archive files')
+              for entry in entries:
+                  if entry.file_size > allowed[entry.filename] or stat.S_ISLNK(entry.external_attr >> 16):
+                      raise ValueError('Unsafe archive entry')
+              archive.extractall(directory)
+          metadata = json.loads((directory / 'image.json').read_text())
+          image_ref = os.environ['IMAGE_REF']
+          repository = image_ref.rsplit(':', 1)[0]
+          if set(metadata) != {'image_ref', 'image_digest', 'image_id', 'revision'} or metadata['image_ref'] != image_ref or metadata['revision'] != os.environ['SOURCE_SHA']:
+              raise ValueError('Archive belongs to a different image or revision')
+          if not re.fullmatch(re.escape(repository) + r'@sha256:[a-f0-9]{64}', metadata['image_digest']) or not re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['image_id']):
+              raise ValueError('Invalid image digest or ID')
+          receipt = (directory / 'main-image.tar.gz.sha256').read_text().split()
+          if receipt != [checksum(directory / 'main-image.tar.gz'), 'main-image.tar.gz']:
+              raise ValueError('Exported image checksum mismatch')
+          print(metadata['image_digest'], metadata['image_id'])
+          PY
+            )"
+            read -r ARCHIVE_IMAGE_DIGEST ARCHIVE_IMAGE_ID <<< "${ARCHIVE_INFO}"
+            docker load --input "${ARCHIVE_DIR}/main-image.tar.gz"
+            LOADED_IMAGE_ID="$(docker image inspect --format '{{ .Id }}' "${IMAGE_REF}")"
+            if [ "${LOADED_IMAGE_ID}" != "${ARCHIVE_IMAGE_ID}" ]; then
+              printf '%s\n' 'Loaded image ID differs from the verified archive.' >&2
+              exit 1
+            fi
+            # Resolve registry metadata after loading; large layers are cached.
+            timeout --signal=TERM --kill-after=30s 3m docker pull "${IMAGE_REF}"
+            IMAGE_PULLED=true
+          fi
           if [ "${IMAGE_PULLED}" != true ]; then
             printf '%s\n' 'Image pull failed after two attempts; the running service was not changed.' >&2
             exit 1
@@ -132,6 +220,10 @@ jobs:
             printf '%s\n' 'Image digest must contain 64 hexadecimal characters' >&2
             exit 1
           fi
+          if [ -n "${ARCHIVE_IMAGE_DIGEST}" ] && [ "${IMAGE_DIGEST}" != "${ARCHIVE_IMAGE_DIGEST}" ]; then
+            printf '%s\n' 'Registry digest differs from the verified build archive.' >&2
+            exit 1
+          fi
           printf 'image_digest=%s\n' "${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
 
           read -r CURRENT_IMAGE < <(
@@ -146,7 +238,7 @@ jobs:
           fi
 
       - name: Update Swarm service
-        if: steps.image.outputs.already_deployed != 'true'
+        if: steps.image.outputs.already_deployed != 'true' && github.event.action != 'verify-image-archive'
         timeout-minutes: 8
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
@@ -182,7 +274,7 @@ jobs:
 
   notify:
     needs: [validate, deploy]
-    if: always()
+    if: always() && github.event.action == 'deploy-service'
     runs-on: ubuntu-latest
     steps:
       - name: Send Feishu result

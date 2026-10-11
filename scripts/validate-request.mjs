@@ -4,6 +4,7 @@ import {
   validateDeployConfig,
   validateDispatch,
   validateWorkflowRun,
+  validateImageArchive,
 } from "./policy.mjs";
 
 const eventPath = process.env.GITHUB_EVENT_PATH;
@@ -60,7 +61,13 @@ if (file.type !== "file" || file.encoding !== "base64") {
 
 const config = YAML.parse(Buffer.from(file.content, "base64").toString("utf8"));
 const deploy = validateDeployConfig(config, request, expectedServer);
+const archiveListing = await github(
+  `/repos/${request.sourceRepo}/actions/runs/${request.sourceRunId}/artifacts?per_page=100`,
+);
+const archive = validateImageArchive(archiveListing.artifacts, request);
 const outputs = {
+  image_archive_id: archive?.id ?? "",
+  image_archive_digest: archive?.digest ?? "",
   build_conclusion: run.conclusion,
   display_name: deploy.displayName,
   healthcheck_url: deploy.healthcheckUrl,
@@ -79,4 +86,3 @@ for (const [key, value] of Object.entries(outputs)) {
 console.log(
   `Validated ${request.sourceRepo}@${request.sourceSha} for ${deploy.swarmService}`,
 );
-
