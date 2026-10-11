@@ -21,6 +21,7 @@ jobs:
       image_ref: ${{ steps.policy.outputs.image_ref }}
       image_archive_id: ${{ steps.policy.outputs.image_archive_id }}
       image_archive_digest: ${{ steps.policy.outputs.image_archive_digest }}
+      image_archive_size: ${{ steps.policy.outputs.image_archive_size }}
       service_prefix: ${{ steps.policy.outputs.service_prefix }}
       source_repo: ${{ steps.policy.outputs.source_repo }}
       source_run_url: ${{ steps.policy.outputs.source_run_url }}
@@ -57,6 +58,11 @@ jobs:
       group: deploy-monadao-prod
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
       - name: Validate deployment inputs on the server
         env:
           IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
@@ -90,6 +96,7 @@ jobs:
           SOURCE_REPO: ${{ needs.validate.outputs.source_repo }}
           IMAGE_ARCHIVE_ID: ${{ needs.validate.outputs.image_archive_id }}
           IMAGE_ARCHIVE_DIGEST: ${{ needs.validate.outputs.image_archive_digest }}
+          IMAGE_ARCHIVE_SIZE: ${{ needs.validate.outputs.image_archive_size }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
           IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
         run: |
@@ -127,24 +134,8 @@ jobs:
             ARCHIVE_DIR="$(mktemp -d "${RUNNER_TEMP}/production-image.XXXXXX")"
             trap 'rm -rf -- "${ARCHIVE_DIR}"' EXIT
             export ARCHIVE_DIR
-            ARCHIVE_DOWNLOADED=false
-            for archive_attempt in {1..8}; do
-              printf 'Recovering verified build archive (attempt %s/8)\n' "${archive_attempt}"
-              if curl --proto '=https' --proto-redir '=https' --location --fail --silent --show-error \
-                --connect-timeout 15 --max-time 240 --speed-time 45 --speed-limit 1024 \
-                --continue-at - --output "${ARCHIVE_DIR}/image.zip" \
-                --header "Authorization: Bearer ${SOURCE_READ_TOKEN}" \
-                --header 'Accept: application/vnd.github+json' \
-                "https://api.github.com/repos/${SOURCE_REPO}/actions/artifacts/${IMAGE_ARCHIVE_ID}/zip"; then
-                ARCHIVE_DOWNLOADED=true
-                break
-              fi
-              sleep 5
-            done
-            if [ "${ARCHIVE_DOWNLOADED}" != true ]; then
-              printf '%s\n' 'Archive recovery failed; the running service was not changed.' >&2
-              exit 1
-            fi
+            printf '%s\n' 'Recovering the verified build archive with eight resumable ranges'
+            python3 "${GITHUB_WORKSPACE}/scripts/download-archive.py"
             ARCHIVE_INFO="$(python3 - <<'PY'
           import hashlib, json, os, pathlib, re, stat, zipfile
           directory = pathlib.Path(os.environ['ARCHIVE_DIR'])

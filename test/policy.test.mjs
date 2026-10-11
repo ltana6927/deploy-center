@@ -19,6 +19,7 @@ test("image archives are bound to the successful source run and commit", () => {
   assert.deepEqual(validateImageArchive([artifact], request), {
     id: "456",
     digest: artifact.digest,
+    size: "100",
   });
   assert.equal(validateImageArchive([], request), null);
   for (const override of [

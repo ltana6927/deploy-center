@@ -42,7 +42,11 @@ export function validateImageArchive(artifacts, request) {
       "Image archive is expired, invalid, or belongs to another build",
     );
   }
-  return { id: String(artifact.id), digest: artifact.digest };
+  return {
+    id: String(artifact.id),
+    digest: artifact.digest,
+    size: String(artifact.size_in_bytes),
+  };
 }
 
 function requiredString(value, field) {

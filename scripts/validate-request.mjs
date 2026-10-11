@@ -68,6 +68,7 @@ const archive = validateImageArchive(archiveListing.artifacts, request);
 const outputs = {
   image_archive_id: archive?.id ?? "",
   image_archive_digest: archive?.digest ?? "",
+  image_archive_size: archive?.size ?? "",
   build_conclusion: run.conclusion,
   display_name: deploy.displayName,
   healthcheck_url: deploy.healthcheckUrl,
