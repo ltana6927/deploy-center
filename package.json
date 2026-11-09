@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "deploy:webhook": "wrangler deploy",
-    "test": "node --test && python3 -m unittest discover -s test -p '*_test.py'",
+    "test": "node --test test/*.test.mjs && python3 -m unittest discover -s test -p '*_test.py'",
+    "test:swarm": "node integration/offline-swarm.mjs",
     "validate:config": "node scripts/validate-config.mjs"
   },
   "dependencies": {

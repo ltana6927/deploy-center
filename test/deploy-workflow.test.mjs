@@ -16,6 +16,12 @@ const workflow = parse(
 const imageStep = workflow.jobs.deploy.steps.find(
   (step) => step.id === "image",
 );
+const updateStep = workflow.jobs.deploy.steps.find(
+  (step) => step.name === "Update Swarm service",
+);
+const verifyStep = workflow.jobs.deploy.steps.find(
+  (step) => step.name === "Verify recovered Swarm tasks",
+);
 const nativePython = spawnSync(
   "python3",
   ["-c", "import sys; print(sys.executable)"],
@@ -92,13 +98,22 @@ if (args[0] === "pull") {
   fs.writeFileSync(process.env.PULL_TEST_COUNT, String(count + 1));
   if (process.env.PULL_TEST_FAILURE === "always" || (process.env.PULL_TEST_FAILURE === "first" && count === 0)) process.exit(1);
 } else if (args[0] === "image") {
+  if (process.env.PULL_TEST_LOCAL_IMAGE_MISSING && args.includes("sha256:" + "c".repeat(64))) process.exit(1);
   console.log(args.includes("{{ .Id }}") ? (process.env.PULL_TEST_IMAGE_ID ?? "sha256:" + "c".repeat(64)) : args.includes("{{ index .RepoDigests 0 }}") ? process.env.PULL_TEST_DIGEST : (process.env.PULL_TEST_REVISION ?? process.env.SOURCE_SHA));
+} else if (args[0] === "info") {
+  console.log(JSON.stringify({ NodeID: "node-1", LocalNodeState: "active", ControlAvailable: true }));
+} else if (args[0] === "node") {
+  console.log(args[1] === "ls" ? (process.env.PULL_TEST_NODES ?? "node-1") : JSON.stringify({ Status: { State: "ready" }, Spec: { Availability: "active" } }));
+} else if (args[0] === "inspect") {
+  console.log(JSON.stringify({ NodeID: "node-1", Status: { State: "running", ContainerStatus: { ContainerID: "container-1" } } }));
+} else if (args[0] === "container") {
+  console.log(process.env.PULL_TEST_TASK_IMAGE ?? "sha256:" + "c".repeat(64));
 } else if (args[0] === "service") {
-  console.log(process.env.PULL_TEST_CURRENT ?? "old-image");
+  console.log(args[1] === "ps" ? "task-1" : (process.env.PULL_TEST_CURRENT ?? "old-image"));
 }
 `;
 
-async function run(t, overrides = {}) {
+async function run(t, overrides = {}, rollout = false) {
   const directory = await mkdtemp(join(tmpdir(), "deploy-pull-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const bin = join(directory, "bin");
@@ -111,31 +126,45 @@ async function run(t, overrides = {}) {
   const output = join(directory, "output");
   await writeFile(output, "");
   const digest = `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`;
-  const result = spawnSync("bash", ["-c", imageStep.run], {
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    IMAGE_REF: `ghcr.io/ltana6927/example/api:${"a".repeat(40)}`,
+    SOURCE_SHA: "a".repeat(40),
+    SWARM_SERVICE: "app_example-api",
+    GITHUB_OUTPUT: output,
+    RUNNER_TEMP: directory,
+    SOURCE_REPO: "ltana6927/example",
+    SOURCE_READ_TOKEN: "test-only",
+    IMAGE_ARCHIVE_ID: "",
+    IMAGE_ARCHIVE_DIGEST: "",
+    IMAGE_ARCHIVE_SIZE: "",
+    IMAGE_RECOVERY_ONLY: "false",
+    GITHUB_WORKSPACE: process.cwd(),
+    PULL_TEST_NATIVE_PYTHON: nativePython,
+    PULL_TEST_LOG: join(directory, "calls"),
+    PULL_TEST_COUNT: join(directory, "count"),
+    PULL_TEST_DIGEST: digest,
+    ...overrides,
+  };
+  let result = spawnSync("bash", ["-c", imageStep.run], {
     encoding: "utf8",
     timeout: 10000,
-    env: {
-      ...process.env,
-      PATH: `${bin}:${process.env.PATH}`,
-      IMAGE_REF: `ghcr.io/ltana6927/example/api:${"a".repeat(40)}`,
-      SOURCE_SHA: "a".repeat(40),
-      SWARM_SERVICE: "app_example-api",
-      GITHUB_OUTPUT: output,
-      RUNNER_TEMP: directory,
-      SOURCE_REPO: "ltana6927/example",
-      SOURCE_READ_TOKEN: "test-only",
-      IMAGE_ARCHIVE_ID: "",
-      IMAGE_ARCHIVE_DIGEST: "",
-      IMAGE_ARCHIVE_SIZE: "",
-      IMAGE_RECOVERY_ONLY: "false",
-      GITHUB_WORKSPACE: process.cwd(),
-      PULL_TEST_NATIVE_PYTHON: nativePython,
-      PULL_TEST_LOG: join(directory, "calls"),
-      PULL_TEST_COUNT: join(directory, "count"),
-      PULL_TEST_DIGEST: digest,
-      ...overrides,
-    },
+    env,
   });
+  if (rollout && result.status === 0) {
+    const outputs = Object.fromEntries(
+      (await readFile(output, "utf8")).trim().split("\n").map((line) => {
+        const split = line.indexOf("=");
+        return [line.slice(0, split), line.slice(split + 1)];
+      }),
+    );
+    const rolloutEnv = { ...env, IMAGE_SOURCE: outputs.image_source, IMAGE_ID: outputs.image_id, ROLLOUT_IMAGE: outputs.rollout_image };
+    if (outputs.already_deployed !== "true")
+      result = spawnSync("bash", ["-c", updateStep.run], { encoding: "utf8", timeout: 10000, env: rolloutEnv });
+    if (result.status === 0 && outputs.image_source === "archive")
+      result = spawnSync("bash", ["-c", verifyStep.run], { encoding: "utf8", timeout: 10000, env: rolloutEnv });
+  }
   const calls = (await readFile(join(directory, "calls"), "utf8"))
     .trim()
     .split("\n")
@@ -269,6 +298,72 @@ test("registry interruption automatically recovers the bound archive through the
   assert.ok(result.output.includes(`image_digest=${result.digest}`));
 });
 
+test("a recovered image rolls out when GHCR stays unavailable and RepoDigests is empty", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)),
+    PULL_TEST_FAILURE: "always",
+    PULL_TEST_DIGEST: "",
+  }, true);
+  assert.equal(result.status, 0, result.stderr);
+  const docker = result.calls.filter((call) => call.name === "docker");
+  assert.equal(docker.filter((call) => call.args[0] === "pull").length, 1);
+  assert.ok(!docker.some((call) => call.args.includes("{{ index .RepoDigests 0 }}")));
+  const update = docker.find((call) => call.args[0] === "service" && call.args[1] === "update");
+  assert.ok(update);
+  assert.ok(update.args.includes("--no-resolve-image"));
+  assert.ok(!update.args.includes("--with-registry-auth"));
+  assert.equal(update.args[update.args.indexOf("--image") + 1], `sha256:${"c".repeat(64)}`);
+  assert.ok(result.output.includes(`image_digest=ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`));
+  assert.ok(result.output.includes("image_source=archive"));
+});
+
+test("registry rollouts still use the verified registry digest and authentication", async (t) => {
+  const result = await run(t, {}, true);
+  assert.equal(result.status, 0, result.stderr);
+  const update = result.calls.find((call) => call.name === "docker" && call.args[1] === "update");
+  assert.equal(update.args[update.args.indexOf("--image") + 1], result.digest);
+  assert.ok(update.args.includes("--with-registry-auth"));
+  assert.ok(!update.args.includes("--no-resolve-image"));
+});
+
+test("archive rollout rejects a cluster with an unseeded second node before service update", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)), PULL_TEST_FAILURE: "always", PULL_TEST_NODES: "node-1\nnode-2",
+  }, true);
+  assert.equal(result.status, 1);
+  assert.equal(result.output, "");
+  assert.match(result.stderr, /single-node Swarm/);
+  assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[1] === "update"));
+});
+
+test("archive redelivery skips rollout only for the same immutable image identity", async (t) => {
+  for (const current of [`sha256:${"c".repeat(64)}`, `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`]) {
+    const result = await run(t, {
+      ...(await fixture(t)), PULL_TEST_FAILURE: "always", PULL_TEST_CURRENT: current,
+    }, true);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.output.includes("already_deployed=true"));
+    assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[1] === "update"));
+    assert.ok(result.calls.some((call) => call.name === "docker" && call.args[0] === "container"));
+  }
+});
+
+test("a recovered image removed before rollout cannot mutate the service", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)), PULL_TEST_FAILURE: "always", PULL_TEST_LOCAL_IMAGE_MISSING: "true",
+  }, true);
+  assert.equal(result.status, 1);
+  assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[1] === "update"));
+});
+
+test("recovered task verification rejects a different running image", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)), PULL_TEST_FAILURE: "always", PULL_TEST_TASK_IMAGE: `sha256:${"d".repeat(64)}`,
+  }, true);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /differs from the authenticated archive/);
+});
+
 test("tampered artifact bytes fail before Docker load or service updates", async (t) => {
   const result = await run(t, {
     ...(await fixture(t)),
@@ -318,10 +413,12 @@ test("archive verification exercises the download path without rolling out a ser
   const result = await run(t, {
     ...(await fixture(t)),
     IMAGE_RECOVERY_ONLY: "true",
+    PULL_TEST_FAILURE: "always",
   });
   assert.equal(result.status, 0, result.stderr);
   const docker = result.calls.filter((call) => call.name === "docker");
   assert.equal(docker[0].args[0], "load");
+  assert.ok(!docker.some((call) => call.args[0] === "pull"));
   const update = workflow.jobs.deploy.steps.find(
     (step) => step.name === "Update Swarm service",
   );

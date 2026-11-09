@@ -101,7 +101,7 @@ jobs:
           IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
         run: |
           set -euo pipefail
-          IMAGE_PULLED=false
+          IMAGE_SOURCE=""
           PULL_ATTEMPTS=2
           PULL_TIMEOUT=20m
           if [ -n "${IMAGE_ARCHIVE_ID}" ]; then
@@ -118,7 +118,7 @@ jobs:
           for ((attempt=1; attempt<=PULL_ATTEMPTS; attempt++)); do
             printf 'Pulling verified image (attempt %s/%s)\n' "${attempt}" "${PULL_ATTEMPTS}"
             if timeout --signal=TERM --kill-after=30s "${PULL_TIMEOUT}" docker pull "${IMAGE_REF}"; then
-              IMAGE_PULLED=true
+              IMAGE_SOURCE=registry
               break
             else
               PULL_STATUS=$?
@@ -129,7 +129,7 @@ jobs:
             fi
           done
           ARCHIVE_IMAGE_DIGEST=""
-          if [ "${IMAGE_PULLED}" != true ] && [ -n "${IMAGE_ARCHIVE_ID}" ]; then
+          if [ "${IMAGE_SOURCE}" != registry ] && [ -n "${IMAGE_ARCHIVE_ID}" ]; then
             umask 077
             ARCHIVE_DIR="$(mktemp -d "${RUNNER_TEMP}/production-image.XXXXXX")"
             trap 'rm -rf -- "${ARCHIVE_DIR}"' EXIT
@@ -176,11 +176,9 @@ jobs:
               printf '%s\n' 'Loaded image ID differs from the verified archive.' >&2
               exit 1
             fi
-            # Resolve registry metadata after loading; large layers are cached.
-            timeout --signal=TERM --kill-after=30s 3m docker pull "${IMAGE_REF}"
-            IMAGE_PULLED=true
+            IMAGE_SOURCE=archive
           fi
-          if [ "${IMAGE_PULLED}" != true ]; then
+          if [ -z "${IMAGE_SOURCE}" ]; then
             printf '%s\n' 'Image pull failed after two attempts; the running service was not changed.' >&2
             exit 1
           fi
@@ -195,10 +193,20 @@ jobs:
             exit 1
           fi
 
+          IMAGE_ID="$(docker image inspect --format '{{ .Id }}' "${IMAGE_REF}")"
           IMAGE_REPOSITORY="${IMAGE_REF%:*}"
-          read -r IMAGE_DIGEST < <(
-            docker image inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE_REF}"
-          )
+          if [ "${IMAGE_SOURCE}" = archive ]; then
+            # docker load does not restore RepoDigests. The authenticated image
+            # ID is immutable and usable offline on the node that loaded it.
+            python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" node
+            IMAGE_DIGEST="${ARCHIVE_IMAGE_DIGEST}"
+            ROLLOUT_IMAGE="${ARCHIVE_IMAGE_ID}"
+          else
+            read -r IMAGE_DIGEST < <(
+              docker image inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE_REF}"
+            )
+            ROLLOUT_IMAGE="${IMAGE_DIGEST}"
+          fi
           case "${IMAGE_DIGEST}" in
             "${IMAGE_REPOSITORY}"@sha256:*) ;;
             *) printf '%s\n' 'Pulled image has an unexpected repository digest' >&2; exit 1 ;;
@@ -216,13 +224,17 @@ jobs:
             exit 1
           fi
           printf 'image_digest=%s\n' "${IMAGE_DIGEST}" >> "${GITHUB_OUTPUT}"
+          printf 'image_id=%s\n' "${IMAGE_ID}" >> "${GITHUB_OUTPUT}"
+          printf 'image_source=%s\n' "${IMAGE_SOURCE}" >> "${GITHUB_OUTPUT}"
+          printf 'rollout_image=%s\n' "${ROLLOUT_IMAGE}" >> "${GITHUB_OUTPUT}"
+          printf 'Verified image source: %s; rollout reference: %s\n' "${IMAGE_SOURCE}" "${ROLLOUT_IMAGE}"
 
           read -r CURRENT_IMAGE < <(
             docker service inspect \
               --format '{{ .Spec.TaskTemplate.ContainerSpec.Image }}' \
               "${SWARM_SERVICE}"
           )
-          if [ "${CURRENT_IMAGE}" = "${IMAGE_DIGEST}" ]; then
+          if [ "${CURRENT_IMAGE}" = "${ROLLOUT_IMAGE}" ] || [ "${CURRENT_IMAGE}" = "${IMAGE_DIGEST}" ]; then
             printf 'already_deployed=true\n' >> "${GITHUB_OUTPUT}"
           else
             printf 'already_deployed=false\n' >> "${GITHUB_OUTPUT}"
@@ -232,19 +244,39 @@ jobs:
         if: steps.image.outputs.already_deployed != 'true' && github.event.action != 'verify-image-archive'
         timeout-minutes: 8
         env:
-          IMAGE_DIGEST: ${{ steps.image.outputs.image_digest }}
+          ROLLOUT_IMAGE: ${{ steps.image.outputs.rollout_image }}
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          IMAGE_SOURCE: ${{ steps.image.outputs.image_source }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
           set -euo pipefail
-          docker service update \
-            --with-registry-auth \
+          EXTRA_ARGS=(--with-registry-auth)
+          if [ "${IMAGE_SOURCE}" = archive ]; then
+            python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" node
+            LOCAL_IMAGE_ID="$(docker image inspect --format '{{ .Id }}' "${ROLLOUT_IMAGE}")"
+            if [ "${LOCAL_IMAGE_ID}" != "${IMAGE_ID}" ]; then
+              printf '%s\n' 'Authenticated local image is no longer available.' >&2
+              exit 1
+            fi
+            EXTRA_ARGS=(--no-resolve-image)
+          fi
+          docker service update "${EXTRA_ARGS[@]}" \
             --update-order start-first \
             --update-parallelism 1 \
             --update-failure-action rollback \
-            --image "${IMAGE_DIGEST}" \
+            --image "${ROLLOUT_IMAGE}" \
             --force \
             --detach=false \
             "${SWARM_SERVICE}"
+
+      - name: Verify recovered Swarm tasks
+        if: steps.image.outputs.image_source == 'archive' && github.event.action != 'verify-image-archive'
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+        run: |
+          python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" tasks \
+            --service "${SWARM_SERVICE}" --image-id "${IMAGE_ID}"
 
       - name: Verify public health endpoint
         timeout-minutes: 8

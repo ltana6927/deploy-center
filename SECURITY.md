@@ -23,5 +23,10 @@ repositories are added to the account.
 
 The public workflow must never print application or container logs. Production
 diagnostics remain on the server or in a private logging system. Images are
-checked against the verified source revision and deployed by registry digest so
-a mutable tag cannot change the artifact selected for a rollout.
+checked against the verified source revision and deployed by immutable registry
+digest. Authenticated archive recovery uses the exact Docker image ID without
+another registry lookup, only on a verified single-node Swarm. The local node
+and cached identity are checked again before rollout, and every running task's
+container must match that image ID afterwards. A mutable tag cannot select a
+different artifact in either path. Archive checksums, source binding and revision
+checks remain mandatory even when an image is already cached.
