@@ -2,7 +2,7 @@ name: Deploy Service
 
 on:
   repository_dispatch:
-    types: [deploy-service, verify-image-archive]
+    types: [deploy-service, verify-image-archive, rehearse-archive-deploy]
 
 permissions:
   contents: read
@@ -155,6 +155,7 @@ jobs:
           IMAGE_ARCHIVE_SIZE: ${{ needs.validate.outputs.image_archive_size }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
           IMAGE_RECOVERY_ONLY: ${{ github.event.action == 'verify-image-archive' && 'true' || 'false' }}
+          REHEARSE_ARCHIVE_RECOVERY: ${{ github.event.action == 'rehearse-archive-deploy' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           IMAGE_SOURCE=""
@@ -163,6 +164,15 @@ jobs:
           if [ -n "${IMAGE_ARCHIVE_ID}" ]; then
             PULL_ATTEMPTS=1
             PULL_TIMEOUT=3m
+          fi
+          if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+            if [ -z "${IMAGE_ARCHIVE_ID}" ] || [ "${IMAGE_RECOVERY_ONLY}" = true ]; then
+              printf '%s\n' 'Archive rollout rehearsal requires a bound archive and rollout mode.' >&2
+              exit 1
+            fi
+            # Fault injection is limited to this CLI invocation, not host networking.
+            PULL_TIMEOUT=0.001s
+            printf '%s\n' 'Archive rehearsal: injecting a pull timeout with a 1 ms limit.'
           fi
           if [ "${IMAGE_RECOVERY_ONLY}" = true ]; then
             if [ -z "${IMAGE_ARCHIVE_ID}" ]; then
@@ -174,11 +184,19 @@ jobs:
           for ((attempt=1; attempt<=PULL_ATTEMPTS; attempt++)); do
             printf 'Pulling verified image (attempt %s/%s)\n' "${attempt}" "${PULL_ATTEMPTS}"
             if timeout --signal=TERM --kill-after=30s "${PULL_TIMEOUT}" docker pull "${IMAGE_REF}"; then
+              if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+                printf '%s\n' 'Rehearsal pull did not time out; refusing to report a recovery success.' >&2
+                exit 1
+              fi
               IMAGE_SOURCE=registry
               break
             else
               PULL_STATUS=$?
               printf 'Image pull failed with exit code %s\n' "${PULL_STATUS}" >&2
+              if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ] && [ "${PULL_STATUS}" -ne 124 ]; then
+                printf '%s\n' 'Rehearsal requires an observed timeout exit code of 124.' >&2
+                exit 1
+              fi
             fi
             if [ "${attempt}" -lt "${PULL_ATTEMPTS}" ]; then
               sleep 15
@@ -290,7 +308,13 @@ jobs:
               --format '{{ .Spec.TaskTemplate.ContainerSpec.Image }}' \
               "${SWARM_SERVICE}"
           )
-          if [ "${CURRENT_IMAGE}" = "${ROLLOUT_IMAGE}" ] || [ "${CURRENT_IMAGE}" = "${IMAGE_DIGEST}" ]; then
+          if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+            # Rehearsals may restart the current image, never upgrade or roll back.
+            python3 "${DEPLOY_SCRIPT_DIR}/verify-local-swarm.py" tasks \
+              --service "${SWARM_SERVICE}" --image-id "${IMAGE_ID}"
+            printf '%s\n' 'Rehearsal verified the currently running image; requesting a real archive rollout.'
+            printf 'already_deployed=false\n' >> "${GITHUB_OUTPUT}"
+          elif [ "${CURRENT_IMAGE}" = "${ROLLOUT_IMAGE}" ] || [ "${CURRENT_IMAGE}" = "${IMAGE_DIGEST}" ]; then
             printf 'already_deployed=true\n' >> "${GITHUB_OUTPUT}"
           else
             printf 'already_deployed=false\n' >> "${GITHUB_OUTPUT}"
@@ -303,6 +327,7 @@ jobs:
           ROLLOUT_IMAGE: ${{ steps.image.outputs.rollout_image }}
           IMAGE_ID: ${{ steps.image.outputs.image_id }}
           IMAGE_SOURCE: ${{ steps.image.outputs.image_source }}
+          REHEARSE_ARCHIVE_RECOVERY: ${{ github.event.action == 'rehearse-archive-deploy' && 'true' || 'false' }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
           set -euo pipefail
@@ -313,6 +338,10 @@ jobs:
             if [ "${LOCAL_IMAGE_ID}" != "${IMAGE_ID}" ]; then
               printf '%s\n' 'Authenticated local image is no longer available.' >&2
               exit 1
+            fi
+            if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+              python3 "${DEPLOY_SCRIPT_DIR}/verify-local-swarm.py" tasks \
+                --service "${SWARM_SERVICE}" --image-id "${IMAGE_ID}"
             fi
             EXTRA_ARGS=(--no-resolve-image)
           fi
@@ -353,7 +382,7 @@ jobs:
 
   notify:
     needs: [validate, deploy]
-    if: always() && github.event.action == 'deploy-service'
+    if: always() && (github.event.action == 'deploy-service' || github.event.action == 'rehearse-archive-deploy')
     runs-on: ubuntu-latest
     steps:
       - name: Send Feishu result
@@ -366,11 +395,15 @@ jobs:
           SOURCE_RUN_URL: ${{ needs.validate.outputs.source_run_url }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha || github.event.client_payload.source_sha }}
           VALIDATE_STATUS: ${{ needs.validate.result }}
+          REHEARSE_ARCHIVE_RECOVERY: ${{ github.event.action == 'rehearse-archive-deploy' && 'true' || 'false' }}
           DEPLOY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if [ -z "${FEISHU_WEBHOOK}" ]; then
             echo "FEISHU_WEBHOOK is not configured"
+            if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+              exit 1
+            fi
             exit 0
           fi
 
@@ -386,6 +419,9 @@ jobs:
           else
             RESULT="Deployment failed"
             COLOR="red"
+          fi
+          if [ "${REHEARSE_ARCHIVE_RECOVERY}" = true ]; then
+            DISPLAY_NAME="${DISPLAY_NAME} (archive recovery rehearsal)"
           fi
 
           PAYLOAD=$(jq -n \

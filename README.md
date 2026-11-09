@@ -140,6 +140,18 @@ source fields and exercises the archive path without a Swarm rollout. Use it
 to check the real download, checksums, image identity and local-node boundary
 independently of GHCR availability.
 
+An authorized `rehearse-archive-deploy` dispatch uses the same three source
+fields to exercise a real production recovery and Feishu result notification.
+It limits only that image-pull CLI invocation to one millisecond and requires
+the observed timeout exit code `124`; host networking is unchanged. After the
+normal authenticated archive download and checks, every currently running task
+must already use the exact recovered image ID. Only then does rehearsal bypass
+redelivery deduplication and perform a real start-first rollout of that same
+image. It cannot upgrade or roll back application code. The same-image guard is
+repeated immediately before update, and task identity and public health are
+checked afterwards. Feishu cards explicitly identify the recovery rehearsal;
+a missing notification webhook fails the rehearsal notification job.
+
 Older builds without an archive retain two attempts, each bounded to 20 minutes with a 30-second
 termination grace period. A failed first attempt waits 15 seconds before
 retrying; Docker reuses completed layers. The deployment job allows 65 minutes

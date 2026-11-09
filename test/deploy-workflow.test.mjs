@@ -74,6 +74,7 @@ if (name === "python3") {
   process.exit(result.status ?? 1);
 }
 if (name === "timeout") {
+  if (args[2] === "0.001s" && !process.env.PULL_TEST_REHEARSAL_NO_TIMEOUT) process.exit(124);
   const result = spawnSync(args[3], args.slice(4), { stdio: "inherit" });
   process.exit(result.status ?? 1);
 }
@@ -122,6 +123,7 @@ async function run(t, overrides = {}, rollout = false) {
   );
   const output = join(directory, "output");
   await writeFile(output, "");
+  await writeFile(join(directory, "calls"), "");
   const digest = `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`;
   const env = {
     ...process.env,
@@ -137,6 +139,7 @@ async function run(t, overrides = {}, rollout = false) {
     IMAGE_ARCHIVE_DIGEST: "",
     IMAGE_ARCHIVE_SIZE: "",
     IMAGE_RECOVERY_ONLY: "false",
+    REHEARSE_ARCHIVE_RECOVERY: "false",
     GITHUB_WORKSPACE: process.cwd(),
     DEPLOY_SCRIPT_DIR: join(process.cwd(), "scripts"),
     PULL_TEST_NATIVE_PYTHON: nativePython,
@@ -166,6 +169,7 @@ async function run(t, overrides = {}, rollout = false) {
   const calls = (await readFile(join(directory, "calls"), "utf8"))
     .trim()
     .split("\n")
+    .filter(Boolean)
     .map(JSON.parse);
   return { ...result, calls, output: await readFile(output, "utf8"), digest };
 }
@@ -322,6 +326,50 @@ test("registry rollouts still use the verified registry digest and authenticatio
   assert.equal(update.args[update.args.indexOf("--image") + 1], result.digest);
   assert.ok(update.args.includes("--with-registry-auth"));
   assert.ok(!update.args.includes("--no-resolve-image"));
+});
+
+test("archive rehearsal observes a timeout and really rolls the same running image", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)), REHEARSE_ARCHIVE_RECOVERY: "true",
+    PULL_TEST_CURRENT: `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`,
+  }, true);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.output.includes("image_source=archive"));
+  assert.ok(result.output.includes("already_deployed=false"));
+  const timeout = result.calls.filter((call) => call.name === "timeout");
+  assert.equal(timeout.length, 1);
+  assert.equal(timeout[0].args[2], "0.001s");
+  const update = result.calls.find((call) => call.name === "docker" && call.args[1] === "update");
+  assert.ok(update.args.includes("--no-resolve-image"));
+  assert.equal(update.args[update.args.indexOf("--image") + 1], `sha256:${"c".repeat(64)}`);
+});
+
+test("rehearsal refuses a different running image before service mutation", async (t) => {
+  const result = await run(t, {
+    ...(await fixture(t)), REHEARSE_ARCHIVE_RECOVERY: "true", PULL_TEST_TASK_IMAGE: `sha256:${"d".repeat(64)}`,
+  }, true);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /differs from the authenticated archive/);
+  assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[1] === "update"));
+});
+
+test("rehearsal cannot claim recovery when the injected pull succeeds or fails without a timeout", async (t) => {
+  for (const failure of ["", "always"]) {
+    const result = await run(t, {
+      ...(await fixture(t)), REHEARSE_ARCHIVE_RECOVERY: "true", PULL_TEST_REHEARSAL_NO_TIMEOUT: "true", PULL_TEST_FAILURE: failure,
+    }, true);
+    assert.notEqual(result.status, 0);
+    assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[0] === "load"));
+    assert.ok(!result.calls.some((call) => call.name === "docker" && call.args[1] === "update"));
+  }
+});
+
+test("rehearsal without an archive or combined with verification-only fails before pull", async (t) => {
+  for (const overrides of [{}, { ...(await fixture(t)), IMAGE_RECOVERY_ONLY: "true" }]) {
+    const result = await run(t, { ...overrides, REHEARSE_ARCHIVE_RECOVERY: "true" });
+    assert.notEqual(result.status, 0);
+    assert.ok(!result.calls.some((call) => call.name === "timeout"));
+  }
 });
 
 test("archive rollout rejects a cluster with an unseeded second node before service update", async (t) => {
