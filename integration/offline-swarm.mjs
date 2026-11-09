@@ -109,6 +109,7 @@ throw new Error("Unexpected fixture command");
     IMAGE_ARCHIVE_ID: "456", IMAGE_ARCHIVE_SIZE: String(zipBytes.length),
     IMAGE_ARCHIVE_DIGEST: `sha256:${createHash("sha256").update(zipBytes).digest("hex")}`,
     IMAGE_RECOVERY_ONLY: "false", SWARM_SERVICE: service, RUNNER_TEMP: directory, GITHUB_WORKSPACE: root,
+    DEPLOY_SCRIPT_DIR: join(root, "scripts"),
     SWARM_TEST_DOCKER: dockerBinary, SWARM_TEST_CONTAINER: name, SWARM_TEST_PYTHON: pythonBinary,
     SWARM_TEST_ARCHIVE: zip, SWARM_TEST_CALLS: callsPath,
   };
