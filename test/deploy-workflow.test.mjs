@@ -47,14 +47,11 @@ test("the image execution step receives every archive recovery input", () => {
     /github\.event\.action == 'verify-image-archive'/,
   );
 });
-test("the server checks out the trusted downloader without persisting credentials", () => {
-  const checkout = workflow.jobs.deploy.steps.find(
-    (step) => step.uses === "actions/checkout@v5",
-  );
-  assert.equal(checkout.with["persist-credentials"], false);
+test("the server executes the trusted API-fetched downloader without a Git checkout", () => {
+  assert.ok(!workflow.jobs.deploy.steps.some((step) => step.uses?.startsWith("actions/checkout@")));
   assert.match(
     imageStep.run,
-    /python3 "\$\{GITHUB_WORKSPACE\}\/scripts\/download-archive\.py"/,
+    /python3 "\$\{DEPLOY_SCRIPT_DIR\}\/download-archive\.py"/,
   );
   assert.equal(
     imageStep.env.IMAGE_ARCHIVE_SIZE,
@@ -141,6 +138,7 @@ async function run(t, overrides = {}, rollout = false) {
     IMAGE_ARCHIVE_SIZE: "",
     IMAGE_RECOVERY_ONLY: "false",
     GITHUB_WORKSPACE: process.cwd(),
+    DEPLOY_SCRIPT_DIR: join(process.cwd(), "scripts"),
     PULL_TEST_NATIVE_PYTHON: nativePython,
     PULL_TEST_LOG: join(directory, "calls"),
     PULL_TEST_COUNT: join(directory, "count"),

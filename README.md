@@ -99,7 +99,15 @@ self-hosted, Linux, X64, monadao-prod, swarm
 ```
 
 The runner must be able to run Docker Swarm commands. The workflow is serialized
-per source repository and globally per production server. The registry path
+per source repository and globally per production server. The production job
+fetches only its two trusted deployment scripts from the official GitHub Contents
+API at the controller's exact workflow commit. It validates file paths, bounded
+sizes and Git blob identities, refuses credential-bearing redirects, and uses
+the job's temporary read-only token without persisting it. This avoids a second
+dependency on `github.com` Git connectivity; files live in the runner's private
+job temporary directory and are cleaned up by the runner.
+
+The registry path
 pulls the full-SHA tag, verifies its OCI revision label, and updates the service
 by immutable registry digest with `start-first` order. Webhook redeliveries skip
 an already-selected immutable image while still running verification and the

@@ -58,10 +58,66 @@ jobs:
       group: deploy-monadao-prod
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-          sparse-checkout: scripts
+      - name: Fetch trusted deployment scripts
+        timeout-minutes: 3
+        shell: python3 {0}
+        env:
+          CONTROLLER_REPO: ${{ github.repository }}
+          CONTROLLER_SHA: ${{ github.sha }}
+          CONTROLLER_READ_TOKEN: ${{ github.token }}
+        run: |
+          import base64, hashlib, json, os, pathlib, re, tempfile, time
+          import urllib.error, urllib.request
+
+          repository = os.environ['CONTROLLER_REPO']
+          revision = os.environ['CONTROLLER_SHA']
+          if repository != 'ltana6927/deploy-center' or not re.fullmatch(r'[a-f0-9]{40}', revision):
+              raise SystemExit('Untrusted deployment controller revision')
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  return None
+
+          opener = urllib.request.build_opener(NoRedirect())
+          def fetch(name):
+              path = 'scripts/' + name
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{repository}/contents/{path}?ref={revision}',
+                  headers={
+                      'Authorization': 'Bearer ' + os.environ['CONTROLLER_READ_TOKEN'],
+                      'Accept': 'application/vnd.github+json',
+                      'User-Agent': 'deploy-center-controller',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  },
+              )
+              for attempt in range(3):
+                  try:
+                      with opener.open(request, timeout=20) as response:
+                          raw = response.read(128 * 1024 + 1)
+                      break
+                  except (OSError, urllib.error.URLError):
+                      if attempt == 2:
+                          raise SystemExit('Unable to fetch trusted deployment scripts') from None
+                      time.sleep(2)
+              if len(raw) > 128 * 1024:
+                  raise SystemExit('Deployment script response exceeds size limit')
+              metadata = json.loads(raw)
+              if metadata.get('type') != 'file' or metadata.get('encoding') != 'base64' or metadata.get('path') != path:
+                  raise SystemExit('Unexpected deployment script metadata')
+              content = base64.b64decode(''.join(metadata['content'].splitlines()), validate=True)
+              blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              if len(content) > 64 * 1024 or metadata.get('size') != len(content) or metadata.get('sha') != blob:
+                  raise SystemExit('Deployment script content does not match its Git blob')
+              return content
+
+          files = {name: fetch(name) for name in ('download-archive.py', 'verify-local-swarm.py')}
+          os.umask(0o077)
+          directory = pathlib.Path(tempfile.mkdtemp(prefix='deploy-scripts.', dir=os.environ['RUNNER_TEMP']))
+          for name, content in files.items():
+              (directory / name).write_bytes(content)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'DEPLOY_SCRIPT_DIR={directory}\n')
+          print(f'Fetched trusted deployment scripts at {revision}')
 
       - name: Validate deployment inputs on the server
         env:
@@ -135,7 +191,7 @@ jobs:
             trap 'rm -rf -- "${ARCHIVE_DIR}"' EXIT
             export ARCHIVE_DIR
             printf '%s\n' 'Recovering the verified build archive with eight resumable ranges'
-            python3 "${GITHUB_WORKSPACE}/scripts/download-archive.py"
+            python3 "${DEPLOY_SCRIPT_DIR}/download-archive.py"
             ARCHIVE_INFO="$(python3 - <<'PY'
           import hashlib, json, os, pathlib, re, stat, zipfile
           directory = pathlib.Path(os.environ['ARCHIVE_DIR'])
@@ -198,7 +254,7 @@ jobs:
           if [ "${IMAGE_SOURCE}" = archive ]; then
             # docker load does not restore RepoDigests. The authenticated image
             # ID is immutable and usable offline on the node that loaded it.
-            python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" node
+            python3 "${DEPLOY_SCRIPT_DIR}/verify-local-swarm.py" node
             IMAGE_DIGEST="${ARCHIVE_IMAGE_DIGEST}"
             ROLLOUT_IMAGE="${ARCHIVE_IMAGE_ID}"
           else
@@ -252,7 +308,7 @@ jobs:
           set -euo pipefail
           EXTRA_ARGS=(--with-registry-auth)
           if [ "${IMAGE_SOURCE}" = archive ]; then
-            python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" node
+            python3 "${DEPLOY_SCRIPT_DIR}/verify-local-swarm.py" node
             LOCAL_IMAGE_ID="$(docker image inspect --format '{{ .Id }}' "${ROLLOUT_IMAGE}")"
             if [ "${LOCAL_IMAGE_ID}" != "${IMAGE_ID}" ]; then
               printf '%s\n' 'Authenticated local image is no longer available.' >&2
@@ -275,7 +331,7 @@ jobs:
           IMAGE_ID: ${{ steps.image.outputs.image_id }}
           SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
         run: |
-          python3 "${GITHUB_WORKSPACE}/scripts/verify-local-swarm.py" tasks \
+          python3 "${DEPLOY_SCRIPT_DIR}/verify-local-swarm.py" tasks \
             --service "${SWARM_SERVICE}" --image-id "${IMAGE_ID}"
 
       - name: Verify public health endpoint
