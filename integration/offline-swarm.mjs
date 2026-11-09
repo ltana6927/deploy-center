@@ -97,6 +97,7 @@ if(name === "python3") {
   process.exit(result.status ?? 1);
 }
 if(name === "timeout") {
+  if(args[2] === "0.001s") process.exit(124);
   const result=spawnSync(args[3],args.slice(4),{stdio:"inherit"});
   process.exit(result.status ?? 1);
 }
@@ -109,6 +110,7 @@ throw new Error("Unexpected fixture command");
     IMAGE_ARCHIVE_ID: "456", IMAGE_ARCHIVE_SIZE: String(zipBytes.length),
     IMAGE_ARCHIVE_DIGEST: `sha256:${createHash("sha256").update(zipBytes).digest("hex")}`,
     IMAGE_RECOVERY_ONLY: "false", SWARM_SERVICE: service, RUNNER_TEMP: directory, GITHUB_WORKSPACE: root,
+    REHEARSE_ARCHIVE_RECOVERY: "false",
     DEPLOY_SCRIPT_DIR: join(root, "scripts"),
     SWARM_TEST_DOCKER: dockerBinary, SWARM_TEST_CONTAINER: name, SWARM_TEST_PYTHON: pythonBinary,
     SWARM_TEST_ARCHIVE: zip, SWARM_TEST_CALLS: callsPath,
@@ -124,8 +126,8 @@ throw new Error("Unexpected fixture command");
     }));
     return { result, outputs };
   }
-  function rollout(outputs) {
-    const rolloutEnv = { ...env, IMAGE_SOURCE: outputs.image_source, IMAGE_ID: outputs.image_id, ROLLOUT_IMAGE: outputs.rollout_image };
+  function rollout(outputs, overrides = {}) {
+    const rolloutEnv = { ...env, IMAGE_SOURCE: outputs.image_source, IMAGE_ID: outputs.image_id, ROLLOUT_IMAGE: outputs.rollout_image, ...overrides };
     if (outputs.already_deployed !== "true") command("bash", ["-c", step("Update Swarm service").run], { env: rolloutEnv });
     command("bash", ["-c", step("Verify recovered Swarm tasks").run], { env: rolloutEnv });
   }
@@ -155,9 +157,17 @@ throw new Error("Unexpected fixture command");
   assert.equal(engine("service", "inspect", service, "--format", "{{.Version.Index}}").trim(), before);
   console.log("PASS: verification-only and invalid archives cannot update the service");
 
+  const rehearsal = runImage({ REHEARSE_ARCHIVE_RECOVERY: "true" });
+  assert.equal(rehearsal.result.status, 0, rehearsal.result.stderr);
+  assert.match(rehearsal.result.stderr, /exit code 124/);
+  assert.equal(rehearsal.outputs.already_deployed, "false");
+  rollout(rehearsal.outputs, { REHEARSE_ARCHIVE_RECOVERY: "true" });
+  assert.notEqual(engine("service", "inspect", service, "--format", "{{.Version.Index}}").trim(), before);
+  console.log("PASS: authenticated rehearsal performs a real rollout of the current image after timeout");
+
   const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(calls.filter((call) => call.name === "docker" && call.args[0] === "pull").length, 3);
-  assert.equal(calls.filter((call) => call.name === "docker" && call.args[0] === "service" && call.args[1] === "update").length, 1);
+  assert.equal(calls.filter((call) => call.name === "docker" && call.args[0] === "service" && call.args[1] === "update").length, 2);
   console.log("PASS: only initial pulls are attempted; archive recovery never retries GHCR");
 } finally {
   spawnSync(dockerBinary, ["rm", "--force", "--volumes", name], { encoding: "utf8" });
