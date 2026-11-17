@@ -4,7 +4,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
 import { parse } from "yaml";
 
 const root = process.cwd();
@@ -17,7 +16,7 @@ const network = `${name}-network`;
 const service = "app_example-api";
 const sourceSha = "a".repeat(40);
 const imageRef = `ghcr.io/ltana6927/example/api:${sourceSha}`;
-const registryDigest = `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`;
+let registryDigest;
 const dockerBinary = spawnSync("which", ["docker"], { encoding: "utf8" }).stdout.trim();
 const pythonBinary = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
 
@@ -35,7 +34,7 @@ try {
   // The daemon has no internet route, host socket, published port or host mount.
   // Its anonymous data volume is removed with this test container in finally.
   docker("network", "create", "--internal", network);
-  docker("run", "--privileged", "--detach", "--name", name, "--network", network,
+  docker("run", "--platform", "linux/amd64", "--privileged", "--detach", "--name", name, "--network", network,
     "--env", "DOCKER_TLS_CERTDIR=", "docker:25.0.5-dind@sha256:b41d0183012e2334aacd4e0b8e339b89246c4fdb7eada6cc86b0355f41328549",
     "--storage-driver=vfs", "--tls=false");
   for (let attempt = 0; ; attempt++) {
@@ -44,7 +43,7 @@ try {
     assert.ok(attempt < 60, "Isolated Docker did not start");
     pause(500);
   }
-  const base = command(dockerBinary, ["image", "save", "busybox:1.36"], { encoding: null });
+  const base = command(dockerBinary, ["image", "save", "--platform", "linux/amd64", "busybox:1.36"], { encoding: null });
   command(dockerBinary, ["exec", "-i", name, "docker", "image", "load"], { input: base, encoding: null });
   // Capture swarm-init output: it contains a join token and must not reach CI logs.
   engine("swarm", "init", "--advertise-addr", "eth0");
@@ -58,8 +57,34 @@ try {
   const imageId = engine("image", "inspect", imageRef, "--format", "{{.Id}}").trim();
   const exported = command(dockerBinary, ["exec", name, "docker", "image", "save", imageRef], { encoding: null });
   const archiveImage = join(directory, "main-image.tar.gz");
-  writeFileSync(archiveImage, gzipSync(exported));
-  writeFileSync(join(directory, "image.json"), JSON.stringify({ image_ref: imageRef, image_digest: registryDigest, image_id: imageId, revision: sourceSha }));
+  writeFileSync(join(directory, "engine-image.tar"), exported);
+  // Reproduce a containerd producer's manifest/index ID in an archive loaded
+  // by a classic Docker daemon, rather than mocking both sides to the same ID.
+  const descriptorId = command(pythonBinary, ["-c", `import gzip,hashlib,io,json,pathlib,sys,tarfile
+p=pathlib.Path(sys.argv[1])
+with tarfile.open(p/'engine-image.tar') as source:
+ members=source.getmembers()
+ manifest=json.load(source.extractfile('manifest.json'))[0]
+ config=source.extractfile(manifest['Config']).read()
+ config_id='sha256:'+hashlib.sha256(config).hexdigest()
+ layer_blobs=[source.extractfile(layer).read() for layer in manifest['Layers']]
+ document=json.dumps({'schemaVersion':2,'config':{'digest':config_id},'layers':[{'digest':'sha256:'+hashlib.sha256(raw).hexdigest(),'size':len(raw)} for raw in layer_blobs]}).encode()
+ manifest_id=hashlib.sha256(document).hexdigest()
+ index=json.dumps({'schemaVersion':2,'manifests':[{'digest':'sha256:'+manifest_id,'platform':{'os':'linux','architecture':'amd64'}}]}).encode()
+ index_id=hashlib.sha256(index).hexdigest()
+ blobs={hashlib.sha256(raw).hexdigest():raw for raw in [config,document,index,*layer_blobs]}
+ with tarfile.open(p/'portable-image.tar','w') as output:
+  names={member.name for member in members}
+  for member in members: output.addfile(member,source.extractfile(member) if member.isfile() else None)
+  for digest,raw in blobs.items():
+   name='blobs/sha256/'+digest
+   if name not in names:
+    member=tarfile.TarInfo(name);member.size=len(raw);output.addfile(member,io.BytesIO(raw))
+(p/'main-image.tar.gz').write_bytes(gzip.compress((p/'portable-image.tar').read_bytes(),compresslevel=1))
+print('sha256:'+index_id)`, directory]).trim();
+  assert.notEqual(descriptorId, imageId);
+  registryDigest = `ghcr.io/ltana6927/example/api@${descriptorId}`;
+  writeFileSync(join(directory, "image.json"), JSON.stringify({ image_ref: imageRef, image_digest: registryDigest, image_id: descriptorId, revision: sourceSha }));
   const zip = join(directory, "fixture.zip");
   command(pythonBinary, ["-c", "import hashlib,pathlib,sys,zipfile\np=pathlib.Path(sys.argv[1])\ndata=(p/'main-image.tar.gz').read_bytes()\nwith zipfile.ZipFile(p/'fixture.zip','w') as z:\n z.write(p/'main-image.tar.gz','main-image.tar.gz')\n z.write(p/'image.json','image.json')\n z.writestr('main-image.tar.gz.sha256',hashlib.sha256(data).hexdigest()+'  main-image.tar.gz')", directory]);
   const zipBytes = readFileSync(zip);
@@ -144,7 +169,7 @@ throw new Error("Unexpected fixture command");
   assert.equal(first.outputs.already_deployed, "false");
   rollout(first.outputs);
   assert.equal(engine("service", "inspect", service, "--format", "{{.Spec.TaskTemplate.ContainerSpec.Image}}").trim(), imageId);
-  console.log("PASS: verified archive updates a real Swarm service with no registry route");
+  console.log("PASS: a manifest-ID receipt recovers by config ID and updates real Swarm while registry pulls keep failing");
 
   const before = engine("service", "inspect", service, "--format", "{{.Version.Index}}").trim();
   const second = runImage();

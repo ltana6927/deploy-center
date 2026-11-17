@@ -113,7 +113,7 @@ jobs:
                   raise SystemExit('Deployment script content does not match its Git blob')
               return content
 
-          files = {name: fetch(name) for name in ('download-archive.py', 'verify-local-swarm.py', 'migrate-database.py')}
+          files = {name: fetch(name) for name in ('download-archive.py', 'verify-local-swarm.py', 'migrate-database.py', 'verify-image-archive.py')}
           os.umask(0o077)
           directory = pathlib.Path(tempfile.mkdtemp(prefix='deploy-scripts.', dir=os.environ['RUNNER_TEMP']))
           for name, content in files.items():
@@ -213,46 +213,12 @@ jobs:
             export ARCHIVE_DIR
             printf '%s\n' 'Recovering the verified build archive with eight resumable ranges'
             python3 "${DEPLOY_SCRIPT_DIR}/download-archive.py"
-            ARCHIVE_INFO="$(python3 - <<'PY'
-          import hashlib, json, os, pathlib, re, stat, zipfile
-          directory = pathlib.Path(os.environ['ARCHIVE_DIR'])
-          def checksum(path):
-              digest = hashlib.sha256()
-              with path.open('rb') as stream:
-                  for block in iter(lambda: stream.read(1024 * 1024), b''):
-                      digest.update(block)
-              return digest.hexdigest()
-          if 'sha256:' + checksum(directory / 'image.zip') != os.environ['IMAGE_ARCHIVE_DIGEST']:
-              raise ValueError('Build artifact checksum mismatch')
-          allowed = {'main-image.tar.gz': 2 ** 30, 'main-image.tar.gz.sha256': 128, 'image.json': 4096}
-          with zipfile.ZipFile(directory / 'image.zip') as archive:
-              entries = archive.infolist()
-              if len(entries) != len(allowed) or {entry.filename for entry in entries} != set(allowed):
-                  raise ValueError('Unexpected archive files')
-              for entry in entries:
-                  if entry.file_size > allowed[entry.filename] or stat.S_ISLNK(entry.external_attr >> 16):
-                      raise ValueError('Unsafe archive entry')
-              archive.extractall(directory)
-          metadata = json.loads((directory / 'image.json').read_text())
-          image_ref = os.environ['IMAGE_REF']
-          repository = image_ref.rsplit(':', 1)[0]
-          if set(metadata) != {'image_ref', 'image_digest', 'image_id', 'revision'} or metadata['image_ref'] != image_ref or metadata['revision'] != os.environ['SOURCE_SHA']:
-              raise ValueError('Archive belongs to a different image or revision')
-          if not re.fullmatch(re.escape(repository) + r'@sha256:[a-f0-9]{64}', metadata['image_digest']) or not re.fullmatch(r'sha256:[a-f0-9]{64}', metadata['image_id']):
-              raise ValueError('Invalid image digest or ID')
-          receipt = (directory / 'main-image.tar.gz.sha256').read_text().split()
-          if receipt != [checksum(directory / 'main-image.tar.gz'), 'main-image.tar.gz']:
-              raise ValueError('Exported image checksum mismatch')
-          print(metadata['image_digest'], metadata['image_id'])
-          PY
-            )"
-            read -r ARCHIVE_IMAGE_DIGEST ARCHIVE_IMAGE_ID <<< "${ARCHIVE_INFO}"
+            ARCHIVE_INFO="$(python3 "${DEPLOY_SCRIPT_DIR}/verify-image-archive.py" archive)"
+            read -r ARCHIVE_IMAGE_DIGEST ARCHIVE_CONFIG_ID <<< "${ARCHIVE_INFO}"
+            printf 'Verified archive config: %s\n' "${ARCHIVE_CONFIG_ID}"
             docker load --input "${ARCHIVE_DIR}/main-image.tar.gz"
-            LOADED_IMAGE_ID="$(docker image inspect --format '{{ .Id }}' "${IMAGE_REF}")"
-            if [ "${LOADED_IMAGE_ID}" != "${ARCHIVE_IMAGE_ID}" ]; then
-              printf '%s\n' 'Loaded image ID differs from the verified archive.' >&2
-              exit 1
-            fi
+            ARCHIVE_IMAGE_ID="$(python3 "${DEPLOY_SCRIPT_DIR}/verify-image-archive.py" loaded)"
+            printf 'Verified local engine image: %s\n' "${ARCHIVE_IMAGE_ID}"
             IMAGE_SOURCE=archive
           fi
           if [ -z "${IMAGE_SOURCE}" ]; then
