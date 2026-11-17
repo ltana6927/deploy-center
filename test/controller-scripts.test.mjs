@@ -69,16 +69,16 @@ async function run(t, mode = "valid", overrides = {}) {
   return { ...result, directory, output: await readFile(output, "utf8"), calls: JSON.parse(await readFile(calls, "utf8")) };
 }
 
-test("production fetches only the two trusted scripts at the workflow commit with its temporary read-only token", async (t) => {
+test("production fetches only the three trusted scripts at the workflow commit with its temporary read-only token", async (t) => {
   assert.equal(step.env.CONTROLLER_SHA, "${{ github.sha }}");
   assert.equal(step.env.CONTROLLER_REPO, "${{ github.repository }}");
   assert.equal(step.env.CONTROLLER_READ_TOKEN, "${{ github.token }}");
   assert.equal(step.shell, "python3 {0}");
   const result = await run(t);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.calls.length, 2);
+  assert.equal(result.calls.length, 3);
   const directory = result.output.trim().slice("DEPLOY_SCRIPT_DIR=".length);
-  assert.deepEqual((await readdir(directory)).sort(), ["download-archive.py", "verify-local-swarm.py"]);
+  assert.deepEqual((await readdir(directory)).sort(), ["download-archive.py", "migrate-database.py", "verify-local-swarm.py"]);
   for (const name of await readdir(directory))
     assert.deepEqual(await readFile(join(directory, name)), await readFile(join(process.cwd(), "scripts", name)));
 });
@@ -95,7 +95,7 @@ test("untrusted controller identities fail before any API call or script publica
 test("network failures are bounded and retried without exposing the credential", async (t) => {
   const recovered = await run(t, "retry");
   assert.equal(recovered.status, 0, recovered.stderr);
-  assert.equal(recovered.calls.length, 4);
+  assert.equal(recovered.calls.length, 5);
   const failed = await run(t, "unavailable");
   assert.notEqual(failed.status, 0);
   assert.equal(failed.calls.length, 3);

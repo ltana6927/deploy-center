@@ -70,6 +70,7 @@ const outputs = {
   image_archive_digest: archive?.digest ?? "",
   image_archive_size: archive?.size ?? "",
   build_conclusion: run.conclusion,
+  database_migration: deploy.databaseMigration,
   display_name: deploy.displayName,
   healthcheck_url: deploy.healthcheckUrl,
   image_ref: deploy.imageRef,

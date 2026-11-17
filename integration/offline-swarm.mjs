@@ -85,6 +85,11 @@ if(name === "docker") {
     const result=spawnSync(process.env.SWARM_TEST_DOCKER,["exec","-i",process.env.SWARM_TEST_CONTAINER,"docker","load"],{input,stdio:["pipe","inherit","inherit"]});
     process.exit(result.status ?? 1);
   }
+  if(args[0] === "service" && args[1] === "create" && args.includes("--env-file")) {
+    // Translate the host-side synthetic fixture file for the isolated daemon.
+    const index=args.indexOf("--env-file");
+    args.splice(index,2,"--env",fs.readFileSync(args[index+1],"utf8").trim());
+  }
   const result = spawnSync(process.env.SWARM_TEST_DOCKER,["exec",process.env.SWARM_TEST_CONTAINER,"docker",...args],{stdio:"inherit"});
   process.exit(result.status ?? 1);
 }
@@ -169,6 +174,32 @@ throw new Error("Unexpected fixture command");
   assert.equal(calls.filter((call) => call.name === "docker" && call.args[0] === "pull").length, 3);
   assert.equal(calls.filter((call) => call.name === "docker" && call.args[0] === "service" && call.args[1] === "update").length, 2);
   console.log("PASS: only initial pulls are attempted; archive recovery never retries GHCR");
+
+  // Exercise the real migration controller against an isolated Swarm job.
+  // The fixture's node command returns a controlled migration exit status;
+  // PostgreSQL migration behavior is covered in the business repository.
+  const migrationService = "app_migration-fixture-api";
+  engine("network", "create", "--driver", "overlay", "migration-fixture-network");
+  command(dockerBinary, ["exec", "--env", "DOCKER_BUILDKIT=0", "-i", name, "docker", "build", "--network=none", "--tag", "migration-fixture:latest", "-"], {
+    input: `FROM busybox:1.36\nRUN printf '#!/bin/sh\\ncase "$POSTGRES_URL" in *failed*) exit 7;; esac\\nexit 0\\n' > /bin/node && chmod +x /bin/node\nCMD ["/bin/busybox","sleep","3600"]\n`,
+  });
+  const migrationImage = engine("image", "inspect", "migration-fixture:latest", "--format", "{{.Id}}").trim();
+  engine("service", "create", "--detach=false", "--name", migrationService, "--update-monitor", "1s", "--no-resolve-image",
+    "--network", "migration-fixture-network", "--env", "POSTGRES_URL=postgres://test:fixture-only@database/failed", "offline-seed:old");
+  const migrationEnv = { ...env, SWARM_SERVICE: migrationService, ROLLOUT_IMAGE: migrationImage, IMAGE_ID: migrationImage, IMAGE_SOURCE: "archive" };
+  const pipeline = `set -euo pipefail\n${step("Migrate and verify the production database").run}\n${step("Update Swarm service").run}`;
+  const blocked = spawnSync("bash", ["-c", pipeline], {encoding:"utf8", timeout:60000, env:migrationEnv});
+  assert.notEqual(blocked.status, 0, "Failed migration must block deployment");
+  assert.equal(engine("service", "inspect", migrationService, "--format", "{{.Spec.TaskTemplate.ContainerSpec.Image}}").trim(), "offline-seed:old");
+  assert.equal(engine("service", "ls", "--filter", "name=database-migration-", "--quiet").trim(), "");
+  console.log("PASS: a real failed migration task leaves the old Swarm image serving and removes its temporary job");
+
+  engine("service", "update", "--detach=false", "--env-add", "POSTGRES_URL=postgres://test:fixture-only@database/success", migrationService);
+  const accepted = spawnSync("bash", ["-c", pipeline], {encoding:"utf8", timeout:60000, env:migrationEnv});
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(engine("service", "inspect", migrationService, "--format", "{{.Spec.TaskTemplate.ContainerSpec.Image}}").trim(), migrationImage);
+  assert.equal(engine("service", "ls", "--filter", "name=database-migration-", "--quiet").trim(), "");
+  console.log("PASS: a real successful migration task completes before the new Swarm image is started");
 } finally {
   spawnSync(dockerBinary, ["rm", "--force", "--volumes", name], { encoding: "utf8" });
   spawnSync(dockerBinary, ["network", "rm", network], { encoding: "utf8" });

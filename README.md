@@ -159,6 +159,33 @@ so a slow or interrupted registry download does not consume the rollout and
 health-check budget. Exhausted downloads fail before the service is updated;
 every successful download still requires matching revision and digest checks.
 
+### Database migration gate
+
+Grow Up Star must set `database_migration: drizzle` in its verified deployment
+configuration. Omitting or disabling it is rejected by policy. Other services
+default to `none`; only the fixed `drizzle` operation is supported, never
+repository-provided shell commands.
+
+After verifying the immutable image and before updating the API service, the
+controller starts a one-shot Swarm job using that exact image. It copies only
+the current service's `POSTGRES_URL` through a private temporary env file and
+attaches its existing networks. The job runs on the local verified image node,
+with restart disabled and no HTTP health check. Its fixed command is
+`node /app/.output/server/migrate-production.mjs /app/db-migrations`.
+
+The script must apply and verify migrations before exiting zero. The controller
+requires exactly one completed task, exit zero, and the verified image ID.
+Failure, rejection, timeout, or a different image aborts deployment before
+`docker service update`. Job and env file cleanup runs on success and failure;
+neither credentials nor application logs enter Actions output. Migration status
+is included in deployment notifications. The old API keeps serving throughout
+the migration. New API containers perform only read-only readiness checks.
+
+Release these controller changes before the business repository's new config
+and image. The updated policy rejects legacy Grow Up Star commits without this
+gate; use a compatible gated image for rollback. Database migrations must remain
+compatible with the running old API and are not reversed by container rollback.
+
 Application logs are never copied into GitHub Actions output. When a health
 check fails, inspect them through the server's private logging system.
 

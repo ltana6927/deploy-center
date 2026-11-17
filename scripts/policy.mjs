@@ -12,6 +12,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
   "swarm_service",
   "healthcheck_url",
   "display_name",
+  "database_migration",
 ]);
 const ALLOWED_DISPATCH_KEYS = new Set([
   "source_repo",
@@ -145,6 +146,13 @@ export function validateDeployConfig(config, request, expectedServer) {
     typeof config.display_name === "string" && config.display_name.trim() !== ""
       ? config.display_name.trim()
       : request.repo;
+  const databaseMigration = config.database_migration ?? "none";
+  if (!["none", "drizzle"].includes(databaseMigration)) {
+    throw new Error("database_migration must be none or drizzle");
+  }
+  if (request.sourceRepo === "ltana6927/grow-up-star" && databaseMigration !== "drizzle") {
+    throw new Error("Grow Up Star requires the drizzle database migration gate");
+  }
 
   if (server !== expectedServer) {
     throw new Error(`server must be ${expectedServer}`);
@@ -189,6 +197,7 @@ export function validateDeployConfig(config, request, expectedServer) {
 
   return {
     displayName,
+    databaseMigration,
     healthcheckUrl: healthUrl.toString(),
     imageComponent,
     imageRef: `${imageRepository}:${request.sourceSha}`,
