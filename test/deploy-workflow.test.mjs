@@ -27,6 +27,12 @@ const nativePython = spawnSync(
   ["-c", "import sys; print(sys.executable)"],
   { encoding: "utf8" },
 ).stdout.trim();
+const fixtureConfig = JSON.stringify({
+  architecture: "amd64", os: "linux",
+  config: { Labels: { "org.opencontainers.image.revision": "a".repeat(40) } },
+  rootfs: { type: "layers", diff_ids: [] },
+});
+const fixtureImageId = `sha256:${createHash("sha256").update(fixtureConfig).digest("hex")}`;
 
 test("the image execution step receives every archive recovery input", () => {
   for (const name of [
@@ -96,8 +102,10 @@ if (args[0] === "pull") {
   fs.writeFileSync(process.env.PULL_TEST_COUNT, String(count + 1));
   if (process.env.PULL_TEST_FAILURE === "always" || (process.env.PULL_TEST_FAILURE === "first" && count === 0)) process.exit(1);
 } else if (args[0] === "image") {
-  if (process.env.PULL_TEST_LOCAL_IMAGE_MISSING && args.includes("sha256:" + "c".repeat(64))) process.exit(1);
-  console.log(args.includes("{{ .Id }}") ? (process.env.PULL_TEST_IMAGE_ID ?? "sha256:" + "c".repeat(64)) : args.includes("{{ index .RepoDigests 0 }}") ? process.env.PULL_TEST_DIGEST : (process.env.PULL_TEST_REVISION ?? process.env.SOURCE_SHA));
+  if (process.env.PULL_TEST_LOCAL_IMAGE_MISSING && args.includes(${JSON.stringify(fixtureImageId)})) process.exit(1);
+  const id = process.env.PULL_TEST_IMAGE_ID ?? ${JSON.stringify(fixtureImageId)};
+  if (!args.includes("--format")) console.log(JSON.stringify([{Id:id,Os:"linux",Architecture:"amd64",Config:{Labels:{"org.opencontainers.image.revision":process.env.PULL_TEST_REVISION??process.env.SOURCE_SHA}}}]));
+  else console.log(args.includes("{{ .Id }}") ? id : args.includes("{{ index .RepoDigests 0 }}") ? process.env.PULL_TEST_DIGEST : (process.env.PULL_TEST_REVISION ?? process.env.SOURCE_SHA));
 } else if (args[0] === "info") {
   console.log(JSON.stringify({ NodeID: "node-1", LocalNodeState: "active", ControlAvailable: true }));
 } else if (args[0] === "node") {
@@ -105,7 +113,7 @@ if (args[0] === "pull") {
 } else if (args[0] === "inspect") {
   console.log(JSON.stringify({ NodeID: "node-1", Status: { State: "running", ContainerStatus: { ContainerID: "container-1" } } }));
 } else if (args[0] === "container") {
-  console.log(process.env.PULL_TEST_TASK_IMAGE ?? "sha256:" + "c".repeat(64));
+  console.log(process.env.PULL_TEST_TASK_IMAGE ?? ${JSON.stringify(fixtureImageId)});
 } else if (args[0] === "service") {
   console.log(args[1] === "ps" ? "task-1" : (process.env.PULL_TEST_CURRENT ?? "old-image"));
 }
@@ -245,7 +253,7 @@ async function fixture(t, overrides = {}) {
   const metadata = {
     image_ref: `ghcr.io/ltana6927/example/api:${"a".repeat(40)}`,
     image_digest: `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`,
-    image_id: `sha256:${"c".repeat(64)}`,
+    image_id: fixtureImageId,
     revision: "a".repeat(40),
     ...overrides,
   };
@@ -253,14 +261,22 @@ async function fixture(t, overrides = {}) {
     "python3",
     [
       "-c",
-      `import hashlib, json, sys, zipfile
-data = b'test exported image'
+      `import gzip,hashlib,io,json,sys,tarfile,zipfile
+config=sys.argv[3].encode()
+name=hashlib.sha256(config).hexdigest()+'.json'
+manifest=json.dumps([{'Config':name,'RepoTags':[json.loads(sys.argv[2])['image_ref']],'Layers':[]}]).encode()
+output=io.BytesIO()
+with tarfile.open(fileobj=output,mode='w') as image:
+ for key,raw in [(name,config),('manifest.json',manifest)]:
+  member=tarfile.TarInfo(key);member.size=len(raw);image.addfile(member,io.BytesIO(raw))
+data=gzip.compress(output.getvalue())
 with zipfile.ZipFile(sys.argv[1], 'w') as archive:
  archive.writestr('main-image.tar.gz', data)
  archive.writestr('main-image.tar.gz.sha256', hashlib.sha256(data).hexdigest() + '  main-image.tar.gz')
  archive.writestr('image.json', sys.argv[2])`,
       archive,
       JSON.stringify(metadata),
+      fixtureConfig,
     ],
     { encoding: "utf8" },
   );
@@ -314,7 +330,7 @@ test("a recovered image rolls out when GHCR stays unavailable and RepoDigests is
   assert.ok(update);
   assert.ok(update.args.includes("--no-resolve-image"));
   assert.ok(!update.args.includes("--with-registry-auth"));
-  assert.equal(update.args[update.args.indexOf("--image") + 1], `sha256:${"c".repeat(64)}`);
+  assert.equal(update.args[update.args.indexOf("--image") + 1], fixtureImageId);
   assert.ok(result.output.includes(`image_digest=ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`));
   assert.ok(result.output.includes("image_source=archive"));
 });
@@ -341,7 +357,7 @@ test("archive rehearsal observes a timeout and really rolls the same running ima
   assert.equal(timeout[0].args[2], "0.001s");
   const update = result.calls.find((call) => call.name === "docker" && call.args[1] === "update");
   assert.ok(update.args.includes("--no-resolve-image"));
-  assert.equal(update.args[update.args.indexOf("--image") + 1], `sha256:${"c".repeat(64)}`);
+  assert.equal(update.args[update.args.indexOf("--image") + 1], fixtureImageId);
 });
 
 test("rehearsal refuses a different running image before service mutation", async (t) => {
@@ -383,7 +399,7 @@ test("archive rollout rejects a cluster with an unseeded second node before serv
 });
 
 test("archive redelivery skips rollout only for the same immutable image identity", async (t) => {
-  for (const current of [`sha256:${"c".repeat(64)}`, `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`]) {
+  for (const current of [fixtureImageId, `ghcr.io/ltana6927/example/api@sha256:${"b".repeat(64)}`]) {
     const result = await run(t, {
       ...(await fixture(t)), PULL_TEST_FAILURE: "always", PULL_TEST_CURRENT: current,
     }, true);
@@ -452,7 +468,7 @@ test("loaded image identity must equal the authenticated archive identity", asyn
   });
   assert.equal(result.status, 1);
   assert.equal(result.output, "");
-  assert.match(result.stderr, /Loaded image ID/);
+  assert.match(result.stderr, /Loaded image differs/);
 });
 
 test("archive verification exercises the download path without rolling out a service", async (t) => {

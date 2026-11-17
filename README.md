@@ -121,9 +121,19 @@ responses must match the expected offset and artifact size; timeouts keep only
 valid partial bytes, and expired storage URLs are refreshed without forwarding
 the GitHub credential. No workstation or SSH upload
 is needed. The API artifact digest, exported image checksum, source revision,
-repository, image ID, and recorded registry digest must agree before rollout. Archive
+repository, image config, and recorded registry digest must agree before rollout. Archive
 downloads use the existing source-read token and private temporary files that
 are removed on exit. The runner needs Python 3 and curl with range support.
+
+Image receipts use the exported `linux/amd64` config digest as their portable
+`image_id`. A producer's `docker inspect .Id` can instead be an OCI manifest or
+index digest with the containerd store, while Docker 25 classic uses the config
+digest. `verify-image-archive.py` validates the tar config and any hashed OCI
+descriptor chain before loading; old descriptor-ID receipts remain supported
+only when that chain binds the declared ID to the same platform config. The
+loaded target daemon's ID is checked against these authenticated identities and
+used for offline rollout. Wrong IDs, config hashes, platforms, revisions, tar
+paths and artifact checksums fail before the service is updated.
 
 After an archive is authenticated and loaded, recovery performs no further
 registry pull or `RepoDigests` lookup. `docker load` does not restore registry
