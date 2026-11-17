@@ -198,3 +198,14 @@ test("rejects arbitrary commands and private health targets", () => {
     /unsupported deployment config key/,
   );
 });
+
+test("Grow Up Star cannot omit the migration gate or supply arbitrary commands", () => {
+  const source = { ...request, repo: "grow-up-star", sourceRepo: "ltana6927/grow-up-star" };
+  const config = { version: 1, server: "monadao-prod", mode: "swarm", image_component: "tanstack-start",
+    swarm_service: "app_grow-up-star-api", healthcheck_url: "https://api.angrywind.com/api/health" };
+  for (const database_migration of [undefined, "none", "node arbitrary.mjs"]) {
+    assert.throws(() => validateDeployConfig({ ...config, database_migration }, source, "monadao-prod"));
+  }
+  assert.equal(validateDeployConfig({ ...config, database_migration: "drizzle" }, source, "monadao-prod").databaseMigration, "drizzle");
+  assert.equal(validateDeployConfig({ ...config, swarm_service: "app_railsanya-meeting-api" }, request, "monadao-prod").databaseMigration, "none");
+});

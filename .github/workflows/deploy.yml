@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build_conclusion: ${{ steps.policy.outputs.build_conclusion }}
+      database_migration: ${{ steps.policy.outputs.database_migration }}
       display_name: ${{ steps.policy.outputs.display_name }}
       healthcheck_url: ${{ steps.policy.outputs.healthcheck_url }}
       image_ref: ${{ steps.policy.outputs.image_ref }}
@@ -53,7 +54,9 @@ jobs:
     if: needs.validate.outputs.build_conclusion == 'success'
     runs-on: [self-hosted, Linux, monadao-prod, swarm]
     # Registry download or resumable archive recovery plus rollout and health.
-    timeout-minutes: 65
+    timeout-minutes: 75
+    outputs:
+      migration_result: ${{ steps.migrations.outcome }}
     concurrency:
       group: deploy-monadao-prod
       cancel-in-progress: false
@@ -110,7 +113,7 @@ jobs:
                   raise SystemExit('Deployment script content does not match its Git blob')
               return content
 
-          files = {name: fetch(name) for name in ('download-archive.py', 'verify-local-swarm.py')}
+          files = {name: fetch(name) for name in ('download-archive.py', 'verify-local-swarm.py', 'migrate-database.py')}
           os.umask(0o077)
           directory = pathlib.Path(tempfile.mkdtemp(prefix='deploy-scripts.', dir=os.environ['RUNNER_TEMP']))
           for name, content in files.items():
@@ -320,6 +323,16 @@ jobs:
             printf 'already_deployed=false\n' >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Migrate and verify the production database
+        id: migrations
+        if: needs.validate.outputs.database_migration == 'drizzle' && github.event.action != 'verify-image-archive'
+        timeout-minutes: 8
+        env:
+          ROLLOUT_IMAGE: ${{ steps.image.outputs.rollout_image }}
+          IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          SWARM_SERVICE: ${{ needs.validate.outputs.swarm_service }}
+        run: python3 "${DEPLOY_SCRIPT_DIR}/migrate-database.py"
+
       - name: Update Swarm service
         if: steps.image.outputs.already_deployed != 'true' && github.event.action != 'verify-image-archive'
         timeout-minutes: 8
@@ -388,6 +401,7 @@ jobs:
       - name: Send Feishu result
         env:
           BUILD_STATUS: ${{ needs.validate.outputs.build_conclusion }}
+          MIGRATION_STATUS: ${{ needs.deploy.outputs.migration_result || 'skipped' }}
           DEPLOY_STATUS: ${{ needs.deploy.result }}
           DISPLAY_NAME: ${{ needs.validate.outputs.display_name || github.event.client_payload.source_repo }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
@@ -431,9 +445,10 @@ jobs:
             --arg sha "${SOURCE_SHA}" \
             --arg build "${BUILD_STATUS:-unknown}" \
             --arg deploy "${DEPLOY_STATUS:-unknown}" \
+            --arg migration "${MIGRATION_STATUS:-skipped}" \
             --arg source_url "${SOURCE_RUN_URL}" \
             --arg deploy_url "${DEPLOY_RUN_URL}" \
-            '{msg_type:"interactive",card:{header:{template:$color,title:{tag:"plain_text",content:$title}},elements:[{tag:"div",text:{tag:"lark_md",content:("**Repository:** " + $repo + "\n**Commit:** " + $sha + "\n**Build:** " + $build + "\n**Deploy:** " + $deploy)}},{tag:"action",actions:[{tag:"button",text:{tag:"plain_text",content:"Build logs"},url:$source_url,type:"default"},{tag:"button",text:{tag:"plain_text",content:"Deploy logs"},url:$deploy_url,type:"primary"}]}]}}')
+            '{msg_type:"interactive",card:{header:{template:$color,title:{tag:"plain_text",content:$title}},elements:[{tag:"div",text:{tag:"lark_md",content:("**Repository:** " + $repo + "\n**Commit:** " + $sha + "\n**Build:** " + $build + "\n**Migration:** " + $migration + "\n**Deploy:** " + $deploy)}},{tag:"action",actions:[{tag:"button",text:{tag:"plain_text",content:"Build logs"},url:$source_url,type:"default"},{tag:"button",text:{tag:"plain_text",content:"Deploy logs"},url:$deploy_url,type:"primary"}]}]}}')
 
           curl --fail --silent --show-error \
             --request POST \
